@@ -23,7 +23,7 @@ try:
     cred = credentials.Certificate(cred_dict)
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred, {
-            'storageBucket': "palayan-app.firebasestorage.app"
+            'storageBucket': "palayan-app.appspot.com"
         })
     
     db = firestore.client()
@@ -263,4 +263,5 @@ if __name__ == "__main__":
     #start server
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Server starting on port {port}")
+
     app.run(host="0.0.0.0", port=port, debug=False)
