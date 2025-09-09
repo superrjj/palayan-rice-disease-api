@@ -238,6 +238,31 @@ def health_check():
         "timestamp": datetime.now().isoformat()
     })
 
+# Fetch diseases list
+@app.route("/diseases", methods=["GET"])
+def get_diseases():
+    try:
+        diseases_ref = db.collection("rice_local_diseases")
+        docs = diseases_ref.stream()
+        
+        diseases = []
+        for doc in docs:
+            disease = doc.to_dict()
+            disease["id"] = doc.id
+            diseases.append(disease)
+        
+        return jsonify({
+            "status": "success",
+            "count": len(diseases),
+            "diseases": diseases
+        })
+    except Exception as e:
+        logger.error(f"Error fetching diseases: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
 @app.route("/", methods=["GET"])
 def home():
     """Home endpoint"""
@@ -249,47 +274,10 @@ def home():
             "/model_info": "GET - Get model information",
             "/reload_model": "POST - Reload model from Firebase",
             "/health": "GET - Health check",
-            "/diseases": "GET - Fetch rice diseases from Firestore"
+            "/diseases": "GET - Fetch all diseases from Firestore"
         },
         "model_loaded": model is not None,
         "classes": len(class_names) if class_names else 0
-    })
-
-# 🔥 NEW FUNCTION + ENDPOINT
-def fetch_diseases_from_firestore():
-    """Fetch all rice diseases from Firestore"""
-    if not db:
-        logger.error("Firestore not initialized")
-        return []
-
-    try:
-        diseases_ref = db.collection("rice_local_disease")  # ✅ make sure tama spelling
-        docs = diseases_ref.stream()
-
-        diseases = []
-        for doc in docs:
-            disease_data = doc.to_dict()
-            diseases.append({
-                "id": doc.id,
-                "name": disease_data.get("name", "Unnamed Disease"),
-                "images": disease_data.get("images", []),
-                "createdAt": str(disease_data.get("createdAt")) if disease_data.get("createdAt") else None
-            })
-
-        logger.info(f"Fetched {len(diseases)} rice diseases from Firestore")
-        return diseases
-
-    except Exception as e:
-        logger.error(f"Error fetching diseases: {e}")
-        return []
-
-@app.route("/diseases", methods=["GET"])
-def get_diseases():
-    """API endpoint to fetch diseases from Firestore"""
-    diseases = fetch_diseases_from_firestore()
-    return jsonify({
-        "count": len(diseases),
-        "diseases": diseases
     })
 
 if __name__ == "__main__":
