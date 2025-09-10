@@ -9,14 +9,14 @@ import json, os, logging
 import tempfile
 from datetime import datetime
 
-#logging setup
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
 
-#firebase init
+# Firebase initialization
 try:
     cred_dict = json.loads(os.environ['FIREBASE_JSON'])
     cred = credentials.Certificate(cred_dict)
@@ -33,7 +33,7 @@ except Exception as e:
     db = None
     bucket = None
 
-#globals
+# Globals
 model = None
 class_names = []
 model_version = None
@@ -48,7 +48,7 @@ def load_model_from_firebase():
         return False
     
     try:
-        #check if model exists
+        # Check if model exists
         model_blob = bucket.blob("models/rice_disease_model.h5")
         classes_blob = bucket.blob("models/rice_disease_classes.json")
         metadata_blob = bucket.blob("models/rice_disease_metadata.json")
@@ -57,7 +57,7 @@ def load_model_from_firebase():
             logger.warning("No model found in Firebase Storage")
             return False
         
-        #create temp files
+        # Create temp files
         with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as model_file:
             model_path = model_file.name
             model_blob.download_to_filename(model_path)
@@ -66,12 +66,12 @@ def load_model_from_firebase():
             classes_path = classes_file.name
             classes_blob.download_to_filename(classes_path)
         
-        #load model and classes
+        # Load model and classes
         model = tf.keras.models.load_model(model_path)
         with open(classes_path, "r") as f:
             class_names = json.load(f)
         
-        #load metadata if exists
+        # Load metadata if exists
         if metadata_blob.exists():
             with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as metadata_file:
                 metadata_path = metadata_file.name
@@ -79,7 +79,7 @@ def load_model_from_firebase():
                 with open(metadata_path, "r") as f:
                     metadata = json.load(f)
         
-        #get model version from Firestore
+        # Get model version from Firestore
         try:
             model_doc = db.collection('model_info').document('rice_disease_classifier').get()
             if model_doc.exists:
@@ -87,7 +87,7 @@ def load_model_from_firebase():
         except:
             model_version = 'unknown'
         
-        #cleanup temp files
+        # Cleanup temp files
         os.unlink(model_path)
         os.unlink(classes_path)
         if metadata_blob.exists():
@@ -104,16 +104,16 @@ def get_disease_info(disease_name):
     """Get detailed information about a disease"""
     clean_name = disease_name.replace('_', ' ')
     
-    #try exact match first
+    # Try exact match first
     if disease_name in metadata:
         return metadata[disease_name]
     
-    #try cleaned name match
+    # Try cleaned name match
     for key, value in metadata.items():
         if key.replace('_', ' ').lower() == clean_name.lower():
             return value
     
-    #default response if not found
+    # Default response if not found
     return {
         'scientific_name': 'Unknown',
         'description': f'Information about {clean_name} not available.',
@@ -133,7 +133,7 @@ def predict():
         }), 400
     
     try:
-        #check if image was provided
+        # Check if image was provided
         if 'image' not in request.files:
             return jsonify({
                 "status": "error", 
@@ -147,7 +147,7 @@ def predict():
                 "message": "No image selected"
             }), 400
         
-        #process image
+        # Process image
         image = Image.open(file.stream)
         if image.mode != 'RGB':
             image = image.convert('RGB')
@@ -155,21 +155,21 @@ def predict():
         image = image.resize((224, 224))
         image_array = np.expand_dims(np.array(image) / 255.0, axis=0)
         
-        #make prediction
+        # Make prediction
         predictions = model.predict(image_array)
         predicted_idx = np.argmax(predictions[0])
         confidence = float(predictions[0][predicted_idx])
         predicted_disease = class_names[predicted_idx]
         
-        #get disease information
+        # Get disease information
         disease_info = get_disease_info(predicted_disease)
         
-        #prepare all predictions
+        # Prepare all predictions
         all_predictions = {}
         for i in range(len(class_names)):
             all_predictions[class_names[i]] = float(predictions[0][i])
         
-        #sort predictions by confidence
+        # Sort predictions by confidence
         sorted_predictions = dict(sorted(all_predictions.items(), 
                                        key=lambda x: x[1], reverse=True))
         
@@ -280,11 +280,10 @@ def home():
         "classes": len(class_names) if class_names else 0
     })
 
-# Add this to the very end of your Flask app file, after all the route definitions
-
-if __name__ == "__main__":
+# Initialize model on startup
+def initialize_app():
+    """Initialize the application and load model"""
     try:
-        #load model on startup
         logger.info("Starting Rice Disease Prediction API...")
         logger.info("Loading model from Firebase...")
         model_loaded = load_model_from_firebase()
@@ -293,23 +292,19 @@ if __name__ == "__main__":
             logger.info("Model loaded successfully")
         else:
             logger.warning("Model loading failed, but server will continue...")
-        
-        #start server
-        port = int(os.environ.get("PORT", 5000))
-        logger.info(f"Server starting on port {port}")
-        logger.info("Flask app about to run...")
-        
-        # THIS IS THE CRITICAL MISSING LINE:
-       # app.run(host='0.0.0.0', port=port, debug=False)
-        
+            
+        return model_loaded
     except Exception as e:
-        logger.error(f"Failed to start application: {e}")
+        logger.error(f"Failed to initialize application: {e}")
         import traceback
         traceback.print_exc()
-        raise
+        return False
 
-  
+# Initialize model when the module is imported (for gunicorn)
+initialize_app()
 
-
-
-
+if __name__ == "__main__":
+    # This only runs when called directly with python app.py (development)
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"Server starting on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
