@@ -280,6 +280,8 @@ def home():
         "classes": len(class_names) if class_names else 0
     })
 
+# Add this to the very end of your Flask app file, after all the route definitions
+
 if __name__ == "__main__":
     try:
         #load model on startup
@@ -290,21 +292,24 @@ if __name__ == "__main__":
         if model_loaded:
             logger.info("Model loaded successfully")
         else:
-            logger.warning("Model loading failed, but continuing...")
+            logger.warning("Model loading failed, but server will continue...")
         
         #start server
         port = int(os.environ.get("PORT", 5000))
         logger.info(f"Server starting on port {port}")
         logger.info("Flask app about to run...")
         
-        # Add this line to actually run the Flask app
+        # THIS IS THE CRITICAL MISSING LINE:
         app.run(host='0.0.0.0', port=port, debug=False)
         
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
   
+
 
 
 
