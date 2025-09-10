@@ -39,37 +39,43 @@ class_names = []
 model_version = None
 metadata = {}
 
-def load_model_from_firebase():
-    """Load model from Firebase Storage"""
+def load_model_from_firebase_with_logging():
+    """Load model from Firebase on startup with detailed logging"""
     global model, class_names, model_version, metadata
+
+    print("📦 Starting model preload from Firebase...")
     
     if not bucket:
-        logger.error("Firebase not initialized")
+        print("❌ Firebase bucket not initialized")
         return False
-    
+
     try:
         model_blob = bucket.blob("models/rice_disease_model.h5")
         classes_blob = bucket.blob("models/rice_disease_classes.json")
         metadata_blob = bucket.blob("models/rice_disease_metadata.json")
-        
+
         if not model_blob.exists():
-            logger.warning("No model found in Firebase Storage")
+            print("❌ Model file not found in Firebase Storage")
             return False
-        
-        # Temp files
+
+        # Temporary files
+        import tempfile
         with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as model_file:
             model_path = model_file.name
             model_blob.download_to_filename(model_path)
-        
+            print(f"✅ Model downloaded to {model_path}")
+
         with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as classes_file:
             classes_path = classes_file.name
             classes_blob.download_to_filename(classes_path)
-        
-        # Load model and classes
+            print(f"✅ Classes JSON downloaded to {classes_path}")
+
+        # Load TensorFlow model
         model = tf.keras.models.load_model(model_path)
         with open(classes_path, "r") as f:
             class_names = json.load(f)
-        
+        print(f"✅ Model loaded into memory with {len(class_names)} classes")
+
         # Load metadata if exists
         if metadata_blob.exists():
             with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as metadata_file:
@@ -77,7 +83,8 @@ def load_model_from_firebase():
                 metadata_blob.download_to_filename(metadata_path)
                 with open(metadata_path, "r") as f:
                     metadata = json.load(f)
-        
+            print(f"✅ Metadata loaded with {len(metadata)} entries")
+
         # Get model version from Firestore
         try:
             model_doc = db.collection('model_info').document('rice_disease_classifier').get()
@@ -85,18 +92,29 @@ def load_model_from_firebase():
                 model_version = model_doc.to_dict().get('version', 'unknown')
         except:
             model_version = 'unknown'
-        
+
         # Cleanup temp files
+        import os
         os.unlink(model_path)
         os.unlink(classes_path)
         if metadata_blob.exists():
             os.unlink(metadata_path)
-        
-        logger.info(f"Model loaded successfully - {len(class_names)} classes, version: {model_version}")
+
+        print(f"🚀 Model preload completed successfully! Version: {model_version}")
         return True
+
     except Exception as e:
-        logger.error(f"Error loading model: {e}")
+        print(f"❌ Error loading model from Firebase: {e}")
+        import traceback
+        traceback.print_exc()
         return False
+
+# --- Preload model on app startup ---
+print("=== Preloading model at startup ===")
+preload_success = load_model_from_firebase_with_logging()
+if not preload_success:
+    print("⚠️ Model not loaded at startup. First predict request may take longer.")
+
 
 def get_disease_info(disease_name):
     """Get detailed information about a disease"""
@@ -250,3 +268,4 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         raise
+
