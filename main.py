@@ -22,7 +22,7 @@ try:
     cred = credentials.Certificate(cred_dict)
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred, {
-            'storageBucket': "palayan-app.appspot.com"
+            'storageBucket': "palayan-app.firebasestorage.app"
         })
     
     db = firestore.client()
@@ -268,4 +268,5 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         raise
+
 
