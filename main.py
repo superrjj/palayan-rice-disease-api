@@ -300,7 +300,7 @@ if __name__ == "__main__":
         logger.info("Flask app about to run...")
         
         # THIS IS THE CRITICAL MISSING LINE:
-        app.run(host='0.0.0.0', port=port, debug=False)
+       # app.run(host='0.0.0.0', port=port, debug=False)
         
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
@@ -309,6 +309,7 @@ if __name__ == "__main__":
         raise
 
   
+
 
 
 
