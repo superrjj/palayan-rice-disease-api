@@ -18,18 +18,34 @@ CORS(app)
 
 # Firebase initialization
 try:
-    cred_dict = json.loads(os.environ['FIREBASE_JSON'])
-    cred = credentials.Certificate(cred_dict)
-    if not firebase_admin._apps:
-        firebase_admin.initialize_app(cred, {
-            'storageBucket': "palayan-app.firebasestorage.app"
-        })
+    logger.info("=== FIREBASE INITIALIZATION START ===")
     
-    db = firestore.client()
-    bucket = storage.bucket()
-    logger.info("Firebase initialized successfully")
+    # Check if environment variable exists
+    firebase_json = os.environ.get('FIREBASE_JSON')
+    if not firebase_json:
+        logger.error("FIREBASE_JSON environment variable not found")
+        db = None
+        bucket = None
+    else:
+        logger.info("FIREBASE_JSON found, parsing credentials...")
+        cred_dict = json.loads(firebase_json)
+        cred = credentials.Certificate(cred_dict)
+        
+        if not firebase_admin._apps:
+            logger.info("Initializing Firebase app...")
+            firebase_admin.initialize_app(cred, {
+                'storageBucket': "palayan-app.firebasestorage.app"
+            })
+        
+        logger.info("Getting Firestore and Storage clients...")
+        db = firestore.client()
+        bucket = storage.bucket()
+        logger.info("Firebase initialized successfully")
+        
 except Exception as e:
     logger.error(f"Firebase initialization failed: {e}")
+    import traceback
+    traceback.print_exc()
     db = None
     bucket = None
 
