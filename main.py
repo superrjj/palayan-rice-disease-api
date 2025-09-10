@@ -281,14 +281,30 @@ def home():
     })
 
 if __name__ == "__main__":
-    #load model on startup
-    logger.info("Starting Rice Disease Prediction API...")
-    load_model_from_firebase()
-    
-    #start server
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Server starting on port {port}")
+    try:
+        #load model on startup
+        logger.info("Starting Rice Disease Prediction API...")
+        logger.info("Loading model from Firebase...")
+        model_loaded = load_model_from_firebase()
+        
+        if model_loaded:
+            logger.info("Model loaded successfully")
+        else:
+            logger.warning("Model loading failed, but continuing...")
+        
+        #start server
+        port = int(os.environ.get("PORT", 5000))
+        logger.info(f"Server starting on port {port}")
+        logger.info("Flask app about to run...")
+        
+        # Add this line to actually run the Flask app
+        app.run(host='0.0.0.0', port=port, debug=False)
+        
+    except Exception as e:
+        logger.error(f"Failed to start application: {e}")
+        raise
 
   
+
 
 
