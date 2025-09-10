@@ -1,11 +1,10 @@
 flask
 flask-cors
 firebase-admin
-tensorflow==2.13.0
+tensorflow==2.16.2
 opencv-python-headless==4.8.0.74
 numpy
 pillow
 requests
 gunicorn
 protobuf==3.20.*
-
