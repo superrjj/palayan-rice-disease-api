@@ -27,35 +27,6 @@ CORS(app)
 db = None
 bucket = None
 
-def normalize_bucket(raw: str | None, fallback_project_id: str | None) -> str | None:
-	"""
-	Accepts any of:
-	- palayan-app.appspot.com
-	- gs://palayan-app.firebasestorage.app
-	- palayan-app.firebasestorage.app
-	Returns the Admin SDK bucket name (palayan-app.appspot.com).
-	"""
-	if not raw and fallback_project_id:
-		return f"{fallback_project_id}.appspot.com"
-	if not raw:
-		return None
-
-	value = raw.strip()
-	if value.startswith("gs://"):
-		value = value[len("gs://") :]
-
-	if value.endswith(".appspot.com"):
-		return value
-
-	if value.endswith(".firebasestorage.app"):
-		project = value.replace(".firebasestorage.app", "")
-		return f"{project}.appspot.com"
-
-	if "." not in value:
-		return f"{value}.appspot.com"
-
-	return value
-
 def initialize_firebase():
 	global db, bucket
 
@@ -70,12 +41,8 @@ def initialize_firebase():
 		cred_dict = json.loads(firebase_json)
 		cred = credentials.Certificate(cred_dict)
 
-		# Default to your provided bucket string
-		raw_bucket = os.environ.get("FIREBASE_STORAGE_BUCKET", "palayan-app.firebasestorage.app")
-		storage_bucket = normalize_bucket(raw_bucket, cred_dict.get("project_id"))
-
-		if not storage_bucket:
-			raise RuntimeError("Could not resolve storage bucket name")
+		# Force the exact bucket you specified
+		storage_bucket = "palayan-app.firebasestorage.app"
 
 		if not firebase_admin._apps:
 			logger.info("Initializing Firebase app...")
@@ -95,13 +62,6 @@ class_names: list[str] = []
 model_version: str | None = None
 metadata: dict = {}
 
-def _choose_existing_blob(paths: list[str]):
-	for p in paths:
-		blob = bucket.blob(p)
-		if blob.exists():
-			return blob, p
-	return None, None
-
 def load_model_from_firebase() -> bool:
 	global model, class_names, model_version, metadata
 
@@ -110,25 +70,18 @@ def load_model_from_firebase() -> bool:
 		return False
 
 	try:
-		# Try both in models/ and root
-		model_blob, model_path_key = _choose_existing_blob([
-			"models/rice_disease_model.h5",
-			"rice_disease_model.h5",
-		])
-		classes_blob, classes_path_key = _choose_existing_blob([
-			"models/rice_disease_classes.json",
-			"rice_disease_classes.json",
-		])
-		metadata_blob, metadata_path_key = _choose_existing_blob([
-			"models/rice_disease_metadata.json",
-			"rice_disease_metadata.json",
-		])
+		# Look ONLY in models/ as requested
+		model_blob = bucket.blob("models/rice_disease_model.h5")
+		classes_blob = bucket.blob("models/rice_disease_classes.json")
+		metadata_blob = bucket.blob("models/rice_disease_metadata.json")
 
-		if not model_blob:
-			logger.warning("Model blob not found at models/rice_disease_model.h5 nor rice_disease_model.h5")
-			return False
-		if not classes_blob:
-			logger.warning("Classes blob not found at models/rice_disease_classes.json nor rice_disease_classes.json")
+		missing = []
+		if not model_blob.exists():
+			missing.append("models/rice_disease_model.h5")
+		if not classes_blob.exists():
+			missing.append("models/rice_disease_classes.json")
+		if missing:
+			logger.warning("Missing required files in Storage: %s", ", ".join(missing))
 			return False
 
 		with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as f_m:
@@ -138,14 +91,14 @@ def load_model_from_firebase() -> bool:
 			tmp_classes_path = f_c.name
 			classes_blob.download_to_filename(tmp_classes_path)
 
-		logger.info("Loading model from Storage path: %s", model_path_key)
+		logger.info("Loading model from Storage path: models/rice_disease_model.h5")
 		model = tf.keras.models.load_model(tmp_model_path)
 		with open(tmp_classes_path, "r", encoding="utf-8") as f:
 			class_names = json.load(f)
 
 		metadata = {}
 		tmp_md_path = None
-		if metadata_blob:
+		if metadata_blob.exists():
 			with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f_md:
 				tmp_md_path = f_md.name
 				metadata_blob.download_to_filename(tmp_md_path)
