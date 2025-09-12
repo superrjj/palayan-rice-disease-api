@@ -14,6 +14,7 @@ import json
 import logging
 import tempfile
 from datetime import datetime
+import threading
 
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
@@ -26,6 +27,12 @@ CORS(app)
 
 db = None
 bucket = None
+model = None
+class_names: list[str] = []
+model_version: str | None = None
+metadata: dict = {}
+model_loading = False
+model_loaded = False
 
 def initialize_firebase():
 	global db, bucket
@@ -41,7 +48,6 @@ def initialize_firebase():
 		cred_dict = json.loads(firebase_json)
 		cred = credentials.Certificate(cred_dict)
 
-		# Force the exact bucket you specified
 		storage_bucket = "palayan-app.firebasestorage.app"
 
 		if not firebase_admin._apps:
@@ -55,22 +61,14 @@ def initialize_firebase():
 	except Exception as e:
 		logger.error(f"Firebase initialization failed: {e}", exc_info=True)
 
-initialize_firebase()
-
-model = None
-class_names: list[str] = []
-model_version: str | None = None
-metadata: dict = {}
-
 def load_model_from_firebase() -> bool:
-	global model, class_names, model_version, metadata
+	global model, class_names, model_version, metadata, model_loaded
 
 	if not bucket:
 		logger.error("Firebase not initialized; cannot load model.")
 		return False
 
 	try:
-		# Look ONLY in models/ as requested
 		model_blob = bucket.blob("models/rice_disease_model.h5")
 		classes_blob = bucket.blob("models/rice_disease_classes.json")
 		metadata_blob = bucket.blob("models/rice_disease_metadata.json")
@@ -121,6 +119,7 @@ def load_model_from_firebase() -> bool:
 				except Exception:
 					pass
 
+		model_loaded = True
 		logger.info("Model loaded successfully - %d classes, version: %s", len(class_names), model_version)
 		return True
 	except Exception as e:
@@ -157,8 +156,8 @@ def get_disease_info(disease_name: str) -> dict:
 def predict():
 	global model, class_names
 
-	if model is None:
-		return jsonify({"status": "error", "message": "Model not loaded. Please check server logs."}), 400
+	if not model_loaded:
+		return jsonify({"status": "error", "message": "Model is still loading. Please try again in a few seconds."}), 503
 
 	try:
 		if "image" not in request.files:
@@ -211,7 +210,7 @@ def reload_model():
 @app.route("/model_info", methods=["GET"])
 def model_info():
 	return jsonify({
-		"model_loaded": model is not None,
+		"model_loaded": model_loaded,
 		"num_classes": len(class_names) if class_names else 0,
 		"classes": class_names,
 		"model_version": model_version,
@@ -220,12 +219,13 @@ def model_info():
 
 @app.route("/health", methods=["GET"])
 def health():
+	# Always return 200, even if model is still loading
 	return jsonify({
 		"status": "healthy",
-		"model_loaded": model is not None,
+		"model_loaded": model_loaded,
 		"firebase_connected": db is not None,
 		"timestamp": datetime.utcnow().isoformat() + "Z",
-	})
+	}), 200
 
 @app.route("/diseases", methods=["GET"])
 def get_diseases():
@@ -246,17 +246,28 @@ def get_diseases():
 def initialize_app():
 	try:
 		logger.info("Starting Rice Disease Prediction API...")
-		logger.info("Loading model from Firebase...")
-		loaded = load_model_from_firebase()
-		if loaded:
-			logger.info("Model loaded successfully")
-		else:
-			logger.warning("Model loading failed, but server will continue...")
-		return loaded
+		
+		# Initialize Firebase first
+		initialize_firebase()
+		
+		# Load model in background thread
+		def load_model_async():
+			global model_loading
+			model_loading = True
+			logger.info("Loading model from Firebase...")
+			load_model_from_firebase()
+			model_loading = False
+		
+		# Start model loading in background
+		model_thread = threading.Thread(target=load_model_async, daemon=True)
+		model_thread.start()
+		
+		return True
 	except Exception as e:
 		logger.error(f"Failed to initialize application: {e}", exc_info=True)
 		return False
 
+# Initialize app
 initialize_app()
 
 if __name__ == "__main__":
