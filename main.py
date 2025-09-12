@@ -15,6 +15,7 @@ import logging
 import tempfile
 from datetime import datetime
 import threading
+import time
 
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
@@ -261,6 +262,9 @@ def initialize_app():
 		# Start model loading in background
 		model_thread = threading.Thread(target=load_model_async, daemon=True)
 		model_thread.start()
+		
+		# Give the thread a moment to start
+		time.sleep(0.1)
 		
 		return True
 	except Exception as e:
