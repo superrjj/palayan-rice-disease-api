@@ -1,1 +1,1 @@
-web: gunicorn main:app --workers=1 --threads=8 --timeout=0 --bind 0.0.0.0:$PORT
+web: gunicorn main:app -w 1 -k sync -b 0.0.0.0:$PORT --threads 2 --timeout 120 --graceful-timeout 20 --max-requests 200 --max-requests-jitter 30
