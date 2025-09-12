@@ -246,28 +246,15 @@ def model_info():
         "timestamp": datetime.now().isoformat()
     })
 
-#Check kung buhay paba API
-@app.route("/", methods=["GET"])
-def home():
-    """Simple alive check for Railway"""
-    return jsonify({
-        "status": "alive",
-        "message": "Rice Disease Prediction API is running"
-    })
-
-
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Detailed health check"""
+    """Health check endpoint"""
     return jsonify({
         "status": "healthy",
         "model_loaded": model is not None,
         "firebase_connected": db is not None,
-        "classes_loaded": len(class_names) if class_names else 0,
-        "model_version": model_version,
         "timestamp": datetime.now().isoformat()
     })
-
 
 # Fetch diseases list
 @app.route("/diseases", methods=["GET"])
@@ -294,44 +281,42 @@ def get_diseases():
             "message": str(e)
         }), 500
 
-#Check kung buhay paba API
 @app.route("/", methods=["GET"])
 def home():
-    """Simple alive check for Railway"""
+    """Home endpoint"""
     return jsonify({
-        "status": "alive",
-        "message": "Rice Disease Prediction API is running"
+        "message": "Rice Disease Prediction API",
+        "version": "1.0",
+        "endpoints": {
+            "/predict_disease": "POST - Upload image for disease prediction",
+            "/model_info": "GET - Get model information",
+            "/reload_model": "POST - Reload model from Firebase",
+            "/health": "GET - Health check",
+            "/diseases": "GET - Fetch all diseases from Firestore"
+        },
+        "model_loaded": model is not None,
+        "classes": len(class_names) if class_names else 0
     })
 
-
-#Initialize the model if success to upload
+# Initialize model on startup
 def initialize_app():
     """Initialize the application and load model"""
     try:
         logger.info("Starting Rice Disease Prediction API...")
         logger.info("Loading model from Firebase...")
-
-        model_loaded = False
-        try:
-            model_loaded = load_model_from_firebase()
-        except Exception as e:
-            logger.error(f"Error while loading model: {e}")
-
+        model_loaded = load_model_from_firebase()
+        
         if model_loaded:
-            logger.info(f"Model loaded successfully | Classes: {len(class_names)} | Version: {model_version}")
+            logger.info("Model loaded successfully")
         else:
-            logger.warning("Model NOT loaded (continuing startup so API can respond)")
-
+            logger.warning("Model loading failed, but server will continue...")
+            
         return model_loaded
-
     except Exception as e:
         logger.error(f"Failed to initialize application: {e}")
         import traceback
         traceback.print_exc()
-        # return False but don't crash server
         return False
-
-
 
 # Initialize model when the module is imported (for gunicorn)
 initialize_app()
@@ -341,7 +326,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
-
-
-
 
