@@ -304,19 +304,27 @@ def initialize_app():
     try:
         logger.info("Starting Rice Disease Prediction API...")
         logger.info("Loading model from Firebase...")
-        model_loaded = load_model_from_firebase()
-        
+
+        model_loaded = False
+        try:
+            model_loaded = load_model_from_firebase()
+        except Exception as e:
+            logger.error(f"Error while loading model: {e}")
+
         if model_loaded:
             logger.info(f"Model loaded successfully | Classes: {len(class_names)} | Version: {model_version}")
         else:
-            logger.warning("Model loading failed, but server will continue...")
-            
+            logger.warning("Model NOT loaded (continuing startup so API can respond)")
+
         return model_loaded
+
     except Exception as e:
         logger.error(f"Failed to initialize application: {e}")
         import traceback
         traceback.print_exc()
+        # return False but don't crash server
         return False
+
 
 
 # Initialize model when the module is imported (for gunicorn)
@@ -327,6 +335,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
 
