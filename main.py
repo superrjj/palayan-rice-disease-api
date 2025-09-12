@@ -1,4 +1,4 @@
-# Railway API - Enhanced with better debugging and stability
+#Railway API
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import firebase_admin
@@ -6,69 +6,28 @@ from firebase_admin import credentials, firestore, storage
 import tensorflow as tf
 import numpy as np
 from PIL import Image
-import json, os, logging, sys, time
+import json, os, logging
 import tempfile
 from datetime import datetime
-import signal
 
-# Enhanced logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Logging setup
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Prevent TensorFlow from using GPU (Railway doesn't have GPU)
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
-# Create Flask app with better configuration
 app = Flask(__name__)
-CORS(app, resources={
-    r"/*": {
-        "origins": ["*"],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
-    }
-})
+CORS(app)
 
-# Increase request timeout
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
-
-# Global variables
-model = None
-class_names = []
-model_version = None
-metadata = {}
-app_ready = False
-firebase_ready = False
-
-def signal_handler(signum, frame):
-    """Handle graceful shutdown"""
-    logger.info(f"Received signal {signum}, shutting down gracefully...")
-    sys.exit(0)
-
-# Register signal handlers
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-def init_firebase():
-    """Initialize Firebase with retry logic"""
-    global firebase_ready
+# Firebase initialization
+try:
+    logger.info("=== FIREBASE INITIALIZATION START ===")
     
-    try:
-        logger.info("=== FIREBASE INITIALIZATION START ===")
-        
-        # Check if environment variable exists
-        firebase_json = os.environ.get('FIREBASE_JSON')
-        if not firebase_json:
-            logger.error("FIREBASE_JSON environment variable not found")
-            return None, None
-        
+    # Check if environment variable exists
+    firebase_json = os.environ.get('FIREBASE_JSON')
+    if not firebase_json:
+        logger.error("FIREBASE_JSON environment variable not found")
+        db = None
+        bucket = None
+    else:
         logger.info("FIREBASE_JSON found, parsing credentials...")
         cred_dict = json.loads(firebase_json)
         cred = credentials.Certificate(cred_dict)
@@ -82,112 +41,82 @@ def init_firebase():
         logger.info("Getting Firestore and Storage clients...")
         db = firestore.client()
         bucket = storage.bucket()
+        logger.info("Firebase initialized successfully")
         
-        # Test connection
-        logger.info("Testing Firebase connection...")
-        collections = list(db.collections(limit=1))
-        logger.info("Firebase connection successful!")
-        
-        firebase_ready = True
-        return db, bucket
-        
-    except Exception as e:
-        logger.error(f"Firebase initialization failed: {e}")
-        import traceback
-        traceback.print_exc()
-        firebase_ready = False
-        return None, None
+except Exception as e:
+    logger.error(f"Firebase initialization failed: {e}")
+    import traceback
+    traceback.print_exc()
+    db = None
+    bucket = None
 
-# Initialize Firebase
-db, bucket = init_firebase()
+# Globals
+model = None
+class_names = []
+model_version = None
+metadata = {}
 
-def load_model_with_retry(max_retries=3):
-    """Load model from Firebase with retry logic"""
+#load the model from firebase
+def load_model_from_firebase():
+    """Load model from Firebase Storage"""
     global model, class_names, model_version, metadata
     
     if not bucket:
-        logger.error("Firebase not initialized, cannot load model")
+        logger.error("Firebase not initialized")
         return False
     
-    for attempt in range(max_retries):
+    try:
+        # Check if model exists
+        model_blob = bucket.blob("models/rice_disease_model.h5")
+        classes_blob = bucket.blob("models/rice_disease_classes.json")
+        metadata_blob = bucket.blob("models/rice_disease_metadata.json")
+        
+        if not model_blob.exists():
+            logger.warning("No model found in Firebase Storage")
+            return False
+        
+        # Create temp files
+        with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as model_file:
+            model_path = model_file.name
+            model_blob.download_to_filename(model_path)
+        
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as classes_file:
+            classes_path = classes_file.name
+            classes_blob.download_to_filename(classes_path)
+        
+        # Load model and classes
+        model = tf.keras.models.load_model(model_path)
+        with open(classes_path, "r") as f:
+            class_names = json.load(f)
+        
+        # Load metadata if exists
+        if metadata_blob.exists():
+            with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as metadata_file:
+                metadata_path = metadata_file.name
+                metadata_blob.download_to_filename(metadata_path)
+                with open(metadata_path, "r") as f:
+                    metadata = json.load(f)
+        
+        # Get model version from Firestore
         try:
-            logger.info(f"Loading model attempt {attempt + 1}/{max_retries}")
-            
-            # Check if model exists
-            model_blob = bucket.blob("models/rice_disease_model.h5")
-            classes_blob = bucket.blob("models/rice_disease_classes.json")
-            metadata_blob = bucket.blob("models/rice_disease_metadata.json")
-            
-            if not model_blob.exists():
-                logger.warning("No model found in Firebase Storage")
-                return False
-            
-            # Create temp files with better cleanup
-            model_path = None
-            classes_path = None
-            metadata_path = None
-            
-            try:
-                # Download model file
-                logger.info("Downloading model file...")
-                with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as model_file:
-                    model_path = model_file.name
-                model_blob.download_to_filename(model_path)
-                
-                # Download classes file
-                logger.info("Downloading classes file...")
-                with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as classes_file:
-                    classes_path = classes_file.name
-                classes_blob.download_to_filename(classes_path)
-                
-                # Load model and classes
-                logger.info("Loading TensorFlow model...")
-                model = tf.keras.models.load_model(model_path, compile=False)
-                
-                logger.info("Loading class names...")
-                with open(classes_path, "r") as f:
-                    class_names = json.load(f)
-                
-                # Load metadata if exists
-                if metadata_blob.exists():
-                    logger.info("Loading metadata...")
-                    with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as metadata_file:
-                        metadata_path = metadata_file.name
-                    metadata_blob.download_to_filename(metadata_path)
-                    with open(metadata_path, "r") as f:
-                        metadata = json.load(f)
-                
-                # Get model version from Firestore
-                try:
-                    model_doc = db.collection('model_info').document('rice_disease_classifier').get()
-                    if model_doc.exists:
-                        model_version = model_doc.to_dict().get('version', 'unknown')
-                    else:
-                        model_version = 'unknown'
-                except:
-                    model_version = 'unknown'
-                
-                logger.info(f"Model loaded successfully - {len(class_names)} classes, version: {model_version}")
-                return True
-                
-            finally:
-                # Cleanup temp files
-                for path in [model_path, classes_path, metadata_path]:
-                    if path and os.path.exists(path):
-                        try:
-                            os.unlink(path)
-                        except:
-                            pass
-                            
-        except Exception as e:
-            logger.error(f"Error loading model (attempt {attempt + 1}): {e}")
-            if attempt == max_retries - 1:
-                import traceback
-                traceback.print_exc()
-            else:
-                time.sleep(2)  # Wait before retry
-    
-    return False
+            model_doc = db.collection('model_info').document('rice_disease_classifier').get()
+            if model_doc.exists:
+                model_version = model_doc.to_dict().get('version', 'unknown')
+        except:
+            model_version = 'unknown'
+        
+        # Cleanup temp files
+        os.unlink(model_path)
+        os.unlink(classes_path)
+        if metadata_blob.exists():
+            os.unlink(metadata_path)
+        
+        logger.info(f"Model loaded successfully - {len(class_names)} classes, version: {model_version}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        return False
 
 def get_disease_info(disease_name):
     """Get detailed information about a disease"""
@@ -211,74 +140,9 @@ def get_disease_info(disease_name):
         'treatments': ['Treatment information not available']
     }
 
-# HEALTH CHECK ROUTES
-@app.route("/", methods=["GET"])
-def home():
-    """Main health check endpoint"""
-    try:
-        status = {
-            "status": "running" if app_ready else "starting",
-            "message": "Rice Disease Prediction API",
-            "version": "1.1",
-            "firebase_ready": firebase_ready,
-            "model_loaded": model is not None,
-            "classes_count": len(class_names) if class_names else 0,
-            "model_version": model_version,
-            "timestamp": datetime.now().isoformat(),
-            "endpoints": {
-                "/predict_disease": "POST - Upload image for disease prediction",
-                "/model_info": "GET - Get model information", 
-                "/reload_model": "POST - Reload model from Firebase",
-                "/health": "GET - Detailed health check",
-                "/diseases": "GET - Fetch all diseases from Firestore"
-            }
-        }
-        
-        return jsonify(status), 200
-        
-    except Exception as e:
-        logger.error(f"Home route error: {e}")
-        return jsonify({
-            "status": "error",
-            "message": "API running but with errors",
-            "error": str(e)
-        }), 200  # Return 200 so Railway doesn't kill the container
-
-@app.route("/health", methods=["GET"])  
-def health_check():
-    """Detailed health check"""
-    try:
-        health = {
-            "status": "healthy" if app_ready else "starting",
-            "app_ready": app_ready,
-            "firebase_ready": firebase_ready,
-            "model_loaded": model is not None,
-            "database_connected": db is not None,
-            "storage_connected": bucket is not None,
-            "classes_loaded": len(class_names) if class_names else 0,
-            "model_version": model_version,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        return jsonify(health), 200
-        
-    except Exception as e:
-        logger.error(f"Health check error: {e}")
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e)
-        }), 200  # Return 200 so Railway doesn't kill the container
-
 @app.route("/predict_disease", methods=["POST"])
 def predict():
-    """Predict disease from uploaded image"""
     global model, class_names
-    
-    if not app_ready:
-        return jsonify({
-            "status": "error",
-            "message": "API is still starting up, please try again in a few seconds"
-        }), 503
     
     if model is None:
         return jsonify({
@@ -310,7 +174,7 @@ def predict():
         image_array = np.expand_dims(np.array(image) / 255.0, axis=0)
         
         # Make prediction
-        predictions = model.predict(image_array, verbose=0)
+        predictions = model.predict(image_array)
         predicted_idx = np.argmax(predictions[0])
         confidence = float(predictions[0][predicted_idx])
         predicted_disease = class_names[predicted_idx]
@@ -346,10 +210,10 @@ def predict():
 
 @app.route("/reload_model", methods=["POST"])
 def reload_model():
-    """Reload model from Firebase"""
+    """Reload model from Firebase - called after retraining"""
     try:
         logger.info("Reloading model...")
-        success = load_model_with_retry()
+        success = load_model_from_firebase()
         
         if success:
             return jsonify({
@@ -374,32 +238,41 @@ def reload_model():
 @app.route("/model_info", methods=["GET"])
 def model_info():
     """Get current model information"""
-    try:
-        return jsonify({
-            "model_loaded": model is not None,
-            "num_classes": len(class_names) if class_names else 0,
-            "classes": class_names,
-            "model_version": model_version,
-            "app_ready": app_ready,
-            "timestamp": datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Model info error: {e}")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+    return jsonify({
+        "model_loaded": model is not None,
+        "num_classes": len(class_names) if class_names else 0,
+        "classes": class_names,
+        "model_version": model_version,
+        "timestamp": datetime.now().isoformat()
+    })
 
+#Check kung buhay paba API
+@app.route("/", methods=["GET"])
+def home():
+    """Simple alive check for Railway"""
+    return jsonify({
+        "status": "alive",
+        "message": "Rice Disease Prediction API is running"
+    })
+
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Detailed health check"""
+    return jsonify({
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "firebase_connected": db is not None,
+        "classes_loaded": len(class_names) if class_names else 0,
+        "model_version": model_version,
+        "timestamp": datetime.now().isoformat()
+    })
+
+
+# Fetch diseases list
 @app.route("/diseases", methods=["GET"])
 def get_diseases():
-    """Fetch diseases from Firestore"""
     try:
-        if not db:
-            return jsonify({
-                "status": "error",
-                "message": "Database not connected"
-            }), 500
-            
         diseases_ref = db.collection("rice_local_diseases")
         docs = diseases_ref.stream()
         
@@ -421,51 +294,54 @@ def get_diseases():
             "message": str(e)
         }), 500
 
+#Check kung buhay paba API
+@app.route("/", methods=["GET"])
+def home():
+    """Simple alive check for Railway"""
+    return jsonify({
+        "status": "alive",
+        "message": "Rice Disease Prediction API is running"
+    })
+
+
+#Initialize the model if success to upload
 def initialize_app():
-    """Initialize the application"""
-    global app_ready
-    
+    """Initialize the application and load model"""
     try:
-        logger.info("=== STARTING RICE DISEASE PREDICTION API ===")
-        logger.info("Python version: " + sys.version)
-        logger.info("TensorFlow version: " + tf.__version__)
-        
-        # Check environment variables
-        port = os.environ.get('PORT', '5000')
-        logger.info(f"Port: {port}")
-        
-        # Load model
+        logger.info("Starting Rice Disease Prediction API...")
         logger.info("Loading model from Firebase...")
+
         model_loaded = False
-        
-        if firebase_ready:
-            model_loaded = load_model_with_retry()
-        else:
-            logger.warning("Firebase not ready, skipping model load")
-        
+        try:
+            model_loaded = load_model_from_firebase()
+        except Exception as e:
+            logger.error(f"Error while loading model: {e}")
+
         if model_loaded:
             logger.info(f"Model loaded successfully | Classes: {len(class_names)} | Version: {model_version}")
         else:
-            logger.warning("Model NOT loaded (API will still start)")
-        
-        app_ready = True
-        logger.info("API initialization complete - ready to handle requests!")
-        
+            logger.warning("Model NOT loaded (continuing startup so API can respond)")
+
         return model_loaded
-        
+
     except Exception as e:
         logger.error(f"Failed to initialize application: {e}")
         import traceback
         traceback.print_exc()
-        app_ready = False
+        # return False but don't crash server
         return False
 
-# Initialize when module is imported
-logger.info("Starting Flask application initialization...")
+
+
+# Initialize model when the module is imported (for gunicorn)
 initialize_app()
 
 if __name__ == "__main__":
-    # Development mode only
+    # This only runs when called directly with python app.py (development)
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🔧 Development server starting on port {port}")
+    logger.info(f"Server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
+
+
+
