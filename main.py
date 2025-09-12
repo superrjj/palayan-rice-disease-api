@@ -56,6 +56,7 @@ class_names = []
 model_version = None
 metadata = {}
 
+#load the model from firebase
 def load_model_from_firebase():
     """Load model from Firebase Storage"""
     global model, class_names, model_version, metadata
@@ -325,4 +326,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
