@@ -1,1 +1,1 @@
-web: gunicorn main:app -w 1 -k sync -b 0.0.0.0:$PORT --threads 2 --timeout 120 --graceful-timeout 20 --max-requests 200 --max-requests-jitter 30
+web: gunicorn main:app -w 1 -k sync -b 0.0.0.0:$PORT --threads 2 --timeout 300 --graceful-timeout 60 --max-requests 200 --max-requests-jitter 30 --preload
