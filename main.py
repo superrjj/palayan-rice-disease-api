@@ -15,7 +15,6 @@ import logging
 import tempfile
 from datetime import datetime
 
-# Reduce TF thread usage for small containers
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 
@@ -52,7 +51,6 @@ def normalize_bucket(raw: str | None, fallback_project_id: str | None) -> str | 
 		project = value.replace(".firebasestorage.app", "")
 		return f"{project}.appspot.com"
 
-	# If just a project id was given
 	if "." not in value:
 		return f"{value}.appspot.com"
 
@@ -72,7 +70,8 @@ def initialize_firebase():
 		cred_dict = json.loads(firebase_json)
 		cred = credentials.Certificate(cred_dict)
 
-		raw_bucket = os.environ.get("FIREBASE_STORAGE_BUCKET", "gs://palayan-app.firebasestorage.app")
+		# Default to your provided bucket string
+		raw_bucket = os.environ.get("FIREBASE_STORAGE_BUCKET", "palayan-app.firebasestorage.app")
 		storage_bucket = normalize_bucket(raw_bucket, cred_dict.get("project_id"))
 
 		if not storage_bucket:
@@ -96,6 +95,13 @@ class_names: list[str] = []
 model_version: str | None = None
 metadata: dict = {}
 
+def _choose_existing_blob(paths: list[str]):
+	for p in paths:
+		blob = bucket.blob(p)
+		if blob.exists():
+			return blob, p
+	return None, None
+
 def load_model_from_firebase() -> bool:
 	global model, class_names, model_version, metadata
 
@@ -104,35 +110,46 @@ def load_model_from_firebase() -> bool:
 		return False
 
 	try:
-		model_blob = bucket.blob("models/rice_disease_model.h5")
-		classes_blob = bucket.blob("models/rice_disease_classes.json")
-		metadata_blob = bucket.blob("models/rice_disease_metadata.json")
+		# Try both in models/ and root
+		model_blob, model_path_key = _choose_existing_blob([
+			"models/rice_disease_model.h5",
+			"rice_disease_model.h5",
+		])
+		classes_blob, classes_path_key = _choose_existing_blob([
+			"models/rice_disease_classes.json",
+			"rice_disease_classes.json",
+		])
+		metadata_blob, metadata_path_key = _choose_existing_blob([
+			"models/rice_disease_metadata.json",
+			"rice_disease_metadata.json",
+		])
 
-		if not model_blob.exists():
-			logger.warning("Model blob not found at models/rice_disease_model.h5")
+		if not model_blob:
+			logger.warning("Model blob not found at models/rice_disease_model.h5 nor rice_disease_model.h5")
 			return False
-		if not classes_blob.exists():
-			logger.warning("Classes blob not found at models/rice_disease_classes.json")
+		if not classes_blob:
+			logger.warning("Classes blob not found at models/rice_disease_classes.json nor rice_disease_classes.json")
 			return False
 
 		with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as f_m:
-			model_path = f_m.name
-			model_blob.download_to_filename(model_path)
+			tmp_model_path = f_m.name
+			model_blob.download_to_filename(tmp_model_path)
 		with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f_c:
-			classes_path = f_c.name
-			classes_blob.download_to_filename(classes_path)
+			tmp_classes_path = f_c.name
+			classes_blob.download_to_filename(tmp_classes_path)
 
-		model = tf.keras.models.load_model(model_path)
-		with open(classes_path, "r", encoding="utf-8") as f:
+		logger.info("Loading model from Storage path: %s", model_path_key)
+		model = tf.keras.models.load_model(tmp_model_path)
+		with open(tmp_classes_path, "r", encoding="utf-8") as f:
 			class_names = json.load(f)
 
 		metadata = {}
-		md_path = None
-		if metadata_blob.exists():
+		tmp_md_path = None
+		if metadata_blob:
 			with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f_md:
-				md_path = f_md.name
-				metadata_blob.download_to_filename(md_path)
-			with open(md_path, "r", encoding="utf-8") as f:
+				tmp_md_path = f_md.name
+				metadata_blob.download_to_filename(tmp_md_path)
+			with open(tmp_md_path, "r", encoding="utf-8") as f:
 				metadata = json.load(f)
 
 		try:
@@ -144,7 +161,7 @@ def load_model_from_firebase() -> bool:
 		except Exception:
 			model_version = "unknown"
 
-		for p in [model_path, classes_path, md_path]:
+		for p in [tmp_model_path, tmp_classes_path, tmp_md_path]:
 			if p:
 				try:
 					os.unlink(p)
