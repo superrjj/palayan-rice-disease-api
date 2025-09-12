@@ -298,7 +298,7 @@ def home():
         "classes": len(class_names) if class_names else 0
     })
 
-# Initialize model on startup
+#Initialize the model if success to upload
 def initialize_app():
     """Initialize the application and load model"""
     try:
@@ -307,7 +307,7 @@ def initialize_app():
         model_loaded = load_model_from_firebase()
         
         if model_loaded:
-            logger.info("Model loaded successfully")
+            logger.info(f"Model loaded successfully | Classes: {len(class_names)} | Version: {model_version}")
         else:
             logger.warning("Model loading failed, but server will continue...")
             
@@ -318,6 +318,7 @@ def initialize_app():
         traceback.print_exc()
         return False
 
+
 # Initialize model when the module is imported (for gunicorn)
 initialize_app()
 
@@ -326,5 +327,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
