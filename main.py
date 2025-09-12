@@ -246,15 +246,28 @@ def model_info():
         "timestamp": datetime.now().isoformat()
     })
 
+#Check kung buhay paba API
+@app.route("/", methods=["GET"])
+def home():
+    """Simple alive check for Railway"""
+    return jsonify({
+        "status": "alive",
+        "message": "Rice Disease Prediction API is running"
+    })
+
+
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint"""
+    """Detailed health check"""
     return jsonify({
         "status": "healthy",
         "model_loaded": model is not None,
         "firebase_connected": db is not None,
+        "classes_loaded": len(class_names) if class_names else 0,
+        "model_version": model_version,
         "timestamp": datetime.now().isoformat()
     })
+
 
 # Fetch diseases list
 @app.route("/diseases", methods=["GET"])
@@ -335,6 +348,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
 
