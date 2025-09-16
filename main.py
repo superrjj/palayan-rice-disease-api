@@ -173,8 +173,14 @@ def predict():
         image = Image.open(file.stream)
         if image.mode != "RGB":
             image = image.convert("RGB")
+        # EXIF orientation fix
+        try:
+            from PIL import ImageOps
+            image = ImageOps.exif_transpose(image)
+        except Exception:
+            pass
 
-        # Compute quick heuristic: green-dominant ratio (pre-resize, cheaper if we thumbnail)
+        # Quick heuristic: green-dominant pixel ratio (pre-resize)
         thumb = image.copy()
         thumb.thumbnail((224, 224))
         arr = np.asarray(thumb, dtype=np.uint8)
@@ -186,30 +192,53 @@ def predict():
         image = image.resize((224, 224))
         image_array = np.expand_dims(np.array(image, dtype=np.float32) / 255.0, axis=0)
 
-        preds = model.predict(image_array)
+        preds = model.predict(image_array, verbose=0)
         probs = preds[0].astype(float)
-        idx = int(np.argmax(probs))
-        conf = float(probs[idx])
-        label = class_names[idx]
 
-        # Top-3 for debugging/telemetry
-        top_idx = np.argsort(probs)[::-1][:3]
+        # Generalized multi-class metrics
+        sorted_idx = np.argsort(probs)[::-1]
+        p1 = float(probs[sorted_idx[0]])
+        p2 = float(probs[sorted_idx[1]]) if len(sorted_idx) > 1 else 0.0
+        label = class_names[int(sorted_idx[0])]
+        conf = p1
+        margin12 = p1 - p2
+
+        K = int(os.getenv("TOPK", "3"))
         top_candidates = [
-            {"label": class_names[i], "confidence": float(probs[i])}
-            for i in top_idx
+            {"label": class_names[int(i)], "confidence": float(probs[i])}
+            for i in sorted_idx[:K]
         ]
-        margin = float(probs[top_idx[0]] - probs[top_idx[1]] if len(top_idx) > 1 else probs[top_idx[0]])
+        topk_sum = float(np.sum(probs[sorted_idx[:K]]))
 
-        # Thresholds (tunable via env)
-        CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.65"))
-        MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.15"))
-        GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.18"))
+        # Entropy (normalized 0..1)
+        eps = 1e-12
+        entropy = float(-np.sum(probs * np.log(probs + eps)))
+        num_classes = max(len(class_names), 2)
+        norm_entropy = float(entropy / np.log(num_classes))
+
+        # Thresholds
+        CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.70"))
+        MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.12"))
+        TOPK_SUM_THRESHOLD = float(os.getenv("TOPK_SUM_THRESHOLD", "0.80"))
+        ENTROPY_THRESHOLD = float(os.getenv("ENTROPY_THRESHOLD", "0.60"))
+        GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.22"))
+
+        logger.info(
+            "predict: label=%s conf=%.3f margin=%.3f topk_sum=%.3f H=%.3f green=%.3f thr=(%.2f,%.2f,%.2f,%.2f,%.2f)",
+            label, conf, margin12, topk_sum, norm_entropy, green_ratio,
+            CONF_THRESHOLD, MARGIN_THRESHOLD, TOPK_SUM_THRESHOLD, ENTROPY_THRESHOLD, GREEN_THRESHOLD
+        )
 
         # Rejection rule: likely NOT a rice leaf
-        is_ood_not_rice = (conf < CONF_THRESHOLD) or (margin < MARGIN_THRESHOLD) or (green_ratio < GREEN_THRESHOLD)
+        is_ood_not_rice = (
+            (conf < CONF_THRESHOLD) or
+            (margin12 < MARGIN_THRESHOLD) or
+            (topk_sum < TOPK_SUM_THRESHOLD) or
+            (norm_entropy > ENTROPY_THRESHOLD) or
+            (green_ratio < GREEN_THRESHOLD)
+        )
 
         if is_ood_not_rice:
-            # Return N/A metadata with explicit status
             return jsonify({
                 "status": "not_rice_leaf",
                 "message": "The image does not appear to be a rice leaf. Please retake a clearer, closer photo of a rice leaf.",
@@ -254,7 +283,7 @@ def predict():
     except Exception as e:
         logger.error(f"Prediction error: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"Prediction failed: {str(e)}"}), 500
-
+		
 @app.route("/reload_model", methods=["POST"])
 def reload_model():
 	try:
@@ -337,4 +366,5 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
+
 
