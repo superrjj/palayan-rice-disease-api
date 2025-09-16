@@ -316,6 +316,10 @@ def health():
 		"timestamp": datetime.utcnow().isoformat() + "Z",
 	}), 200
 
+@app.route("/", methods=["GET"])
+def root():
+	return health()
+
 @app.route("/diseases", methods=["GET"])
 def get_diseases():
 	if db is None:
@@ -366,5 +370,6 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
