@@ -153,48 +153,107 @@ def get_disease_info(disease_name: str) -> dict:
 		"treatments": ["Treatment information not available"],
 	}
 
+#prediction
 @app.route("/predict_disease", methods=["POST"])
 def predict():
-	global model, class_names
+    global model, class_names
 
-	if not model_loaded:
-		return jsonify({"status": "error", "message": "Model is still loading. Please try again in a few seconds."}), 503
+    if not model_loaded:
+        return jsonify({"status": "error", "message": "Model is still loading. Please try again in a few seconds."}), 503
 
-	try:
-		if "image" not in request.files:
-			return jsonify({"status": "error", "message": "No image file provided"}), 400
+    try:
+        if "image" not in request.files:
+            return jsonify({"status": "error", "message": "No image file provided"}), 400
 
-		file = request.files["image"]
-		if file.filename == "":
-			return jsonify({"status": "error", "message": "No image selected"}), 400
+        file = request.files["image"]
+        if file.filename == "":
+            return jsonify({"status": "error", "message": "No image selected"}), 400
 
-		image = Image.open(file.stream)
-		if image.mode != "RGB":
-			image = image.convert("RGB")
-		image = image.resize((224, 224))
-		image_array = np.expand_dims(np.array(image) / 255.0, axis=0)
+        # Load + normalize
+        image = Image.open(file.stream)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
 
-		preds = model.predict(image_array)
-		idx = int(np.argmax(preds[0]))
-		conf = float(preds[0][idx])
-		label = class_names[idx]
+        # Compute quick heuristic: green-dominant ratio (pre-resize, cheaper if we thumbnail)
+        thumb = image.copy()
+        thumb.thumbnail((224, 224))
+        arr = np.asarray(thumb, dtype=np.uint8)
+        r, g, b = arr[..., 0].astype(np.int32), arr[..., 1].astype(np.int32), arr[..., 2].astype(np.int32)
+        green_dom = (g > r) & (g > b)
+        green_ratio = float(np.mean(green_dom))
 
-		info = get_disease_info(label)
-		all_preds = {class_names[i]: float(preds[0][i]) for i in range(len(class_names))}
-		all_sorted = dict(sorted(all_preds.items(), key=lambda x: x[1], reverse=True))
+        # Model input
+        image = image.resize((224, 224))
+        image_array = np.expand_dims(np.array(image, dtype=np.float32) / 255.0, axis=0)
 
-		return jsonify({
-			"status": "success",
-			"predicted_disease": label,
-			"confidence": conf,
-			"disease_info": info,
-			"all_predictions": all_sorted,
-			"model_version": model_version,
-			"timestamp": datetime.utcnow().isoformat() + "Z",
-		})
-	except Exception as e:
-		logger.error(f"Prediction error: {e}", exc_info=True)
-		return jsonify({"status": "error", "message": f"Prediction failed: {str(e)}"}), 500
+        preds = model.predict(image_array)
+        probs = preds[0].astype(float)
+        idx = int(np.argmax(probs))
+        conf = float(probs[idx])
+        label = class_names[idx]
+
+        # Top-3 for debugging/telemetry
+        top_idx = np.argsort(probs)[::-1][:3]
+        top_candidates = [
+            {"label": class_names[i], "confidence": float(probs[i])}
+            for i in top_idx
+        ]
+        margin = float(probs[top_idx[0]] - probs[top_idx[1]] if len(top_idx) > 1 else probs[top_idx[0]])
+
+        # Thresholds (tunable via env)
+        CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.65"))
+        MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.15"))
+        GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.18"))
+
+        # Rejection rule: likely NOT a rice leaf
+        is_ood_not_rice = (conf < CONF_THRESHOLD) or (margin < MARGIN_THRESHOLD) or (green_ratio < GREEN_THRESHOLD)
+
+        if is_ood_not_rice:
+            # Return N/A metadata with explicit status
+            return jsonify({
+                "status": "not_rice_leaf",
+                "message": "The image does not appear to be a rice leaf. Please retake a clearer, closer photo of a rice leaf.",
+                "predicted_disease": "N/A",
+                "confidence": conf,
+                "is_confident": False,
+                "threshold": CONF_THRESHOLD,
+                "green_ratio": green_ratio,
+                "top_candidates": top_candidates,
+                "disease_info": {
+                    "scientific_name": "N/A",
+                    "description": "N/A",
+                    "symptoms": ["N/A"],
+                    "cause": "N/A",
+                    "treatments": ["N/A"],
+                },
+                "all_predictions": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
+                "model_version": model_version,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }), 200
+
+        # Otherwise, proceed as normal
+        info = get_disease_info(label)
+        all_preds = {class_names[i]: float(probs[i]) for i in range(len(class_names))}
+        all_sorted = dict(sorted(all_preds.items(), key=lambda x: x[1], reverse=True))
+
+        return jsonify({
+            "status": "success",
+            "message": None,
+            "predicted_disease": label,
+            "confidence": conf,
+            "is_confident": True,
+            "threshold": CONF_THRESHOLD,
+            "green_ratio": green_ratio,
+            "top_candidates": top_candidates,
+            "disease_info": info,
+            "all_predictions": all_sorted,
+            "model_version": model_version,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Prediction error: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": f"Prediction failed: {str(e)}"}), 500
 
 @app.route("/reload_model", methods=["POST"])
 def reload_model():
@@ -278,3 +337,4 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
+
