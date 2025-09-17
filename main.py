@@ -15,16 +15,20 @@ import tempfile
 from datetime import datetime
 import threading
 import time
-from tensorflow.keras.applications.efficientnet import preprocess_input
+import zipfile
+import shutil
 
-# Enforce channels_last to avoid H5 shape quirks
+# Use channels_last and log versions
 tf.keras.backend.set_image_data_format("channels_last")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logger.info("TF=%s Keras=%s", tf.__version__, tf.keras.__version__)
+
+# EfficientNet preprocessing (must match training)
+from tensorflow.keras.applications.efficientnet import preprocess_input
 
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
@@ -65,6 +69,15 @@ def initialize_firebase():
 	except Exception as e:
 		logger.error(f"Firebase initialization failed: {e}", exc_info=True)
 
+def _blob_from_gs(gs_url: str):
+	if not gs_url or not isinstance(gs_url, str):
+		return None
+	prefix = f"gs://{bucket.name}/"
+	if not gs_url.startswith(prefix):
+		return None
+	path = gs_url[len(prefix):]
+	return bucket.blob(path)
+
 def load_model_from_firebase() -> bool:
 	global model, class_names, model_version, metadata, model_loaded
 
@@ -73,71 +86,117 @@ def load_model_from_firebase() -> bool:
 		return False
 
 	try:
-		model_blob = bucket.blob("models/rice_disease_model.h5")
-		classes_blob = bucket.blob("models/rice_disease_classes.json")
-		metadata_blob = bucket.blob("models/rice_disease_metadata.json")
+		# Try to read model paths from Firestore; fall back to defaults
+		doc = None
+		info = {}
+		try:
+			doc = db.collection("model_info").document("rice_disease_classifier").get()
+			info = doc.to_dict() if doc and doc.exists else {}
+		except Exception:
+			info = {}
+
+		# Prefer SavedModel ZIP if provided
+		saved_zip_blob = _blob_from_gs(info.get("savedmodel_zip_url", "")) if info else None
+		h5_url = info.get("model_url", "gs://palayan-app.firebasestorage.app/models/rice_disease_model.h5") if info is not None else "gs://palayan-app.firebasestorage.app/models/rice_disease_model.h5"
+		classes_url = info.get("classes_url", "gs://palayan-app.firebasestorage.app/models/rice_disease_classes.json")
+		metadata_url = info.get("metadata_url", "gs://palayan-app.firebasestorage.app/models/rice_disease_metadata.json")
+
+		model_blob = _blob_from_gs(h5_url)
+		classes_blob = _blob_from_gs(classes_url)
+		metadata_blob = _blob_from_gs(metadata_url)
 
 		missing = []
-		if not model_blob.exists():
+		if saved_zip_blob is None and (model_blob is None or not model_blob.exists()):
 			missing.append("models/rice_disease_model.h5")
-		if not classes_blob.exists():
+		if classes_blob is None or not classes_blob.exists():
 			missing.append("models/rice_disease_classes.json")
 		if missing:
 			logger.warning("Missing required files in Storage: %s", ", ".join(missing))
 			return False
 
-		with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as f_m:
-			tmp_model_path = f_m.name
-			model_blob.download_to_filename(tmp_model_path)
-		with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f_c:
-			tmp_classes_path = f_c.name
-			classes_blob.download_to_filename(tmp_classes_path)
+		tmp_paths = []
 
-		logger.info("Loading model from Storage path: models/rice_disease_model.h5")
-		# Load without compile to be tolerant to optimizer/metric mismatches
-		model_local = tf.keras.models.load_model(tmp_model_path, compile=False)
-		model = model_local
+		# Try SavedModel ZIP first for robustness
+		loaded = False
+		if saved_zip_blob and saved_zip_blob.exists():
+			with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as fz:
+				tmp_zip = fz.name
+			tmp_paths.append(tmp_zip)
+			saved_zip_blob.download_to_filename(tmp_zip)
 
-		with open(tmp_classes_path, "r", encoding="utf-8") as f:
-			class_names_local = json.load(f)
-			# assign to global
-			global class_names
-			class_names = class_names_local
-
-		# Load optional metadata
-		global metadata
-		metadata = {}
-		tmp_md_path = None
-		if metadata_blob.exists():
-			with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f_md:
-				tmp_md_path = f_md.name
-				metadata_blob.download_to_filename(tmp_md_path)
-			with open(tmp_md_path, "r", encoding="utf-8") as f:
-				metadata = json.load(f)
-
-		# Version from Firestore
-		global model_version
-		try:
-			if db is not None:
-				doc = db.collection("model_info").document("rice_disease_classifier").get()
-				model_version = doc.to_dict().get("version", "unknown") if doc.exists else "unknown"
-			else:
-				model_version = "unknown"
-		except Exception:
-			model_version = "unknown"
-
-		# Cleanup
-		for p in [tmp_model_path, tmp_classes_path, tmp_md_path]:
-			if p:
+			tmp_dir = tempfile.mkdtemp()
+			with zipfile.ZipFile(tmp_zip, "r") as zf:
+				zf.extractall(tmp_dir)
+			try:
+				logger.info("Loading SavedModel directory from ZIP...")
+				model_local = tf.keras.models.load_model(tmp_dir, compile=False)
+				model = model_local
+				loaded = True
+				# cleanup extracted dir later
+				tmp_paths.append(tmp_dir)
+			except Exception as e:
+				logger.warning("SavedModel load failed, will try H5: %s", e)
 				try:
-					os.unlink(p)
+					shutil.rmtree(tmp_dir, ignore_errors=True)
 				except Exception:
 					pass
 
-		global model_loaded
-		model_loaded = True
+		# Fallback: H5 load
+		if not loaded:
+			with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as f_m:
+				tmp_model_path = f_m.name
+			tmp_paths.append(tmp_model_path)
+			logger.info("Loading model from Storage path: models/rice_disease_model.h5")
+			model_blob.download_to_filename(tmp_model_path)
+			model_local = tf.keras.models.load_model(tmp_model_path, compile=False)
+			model = model_local
+
+		# Download classes
+		with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f_c:
+			tmp_classes_path = f_c.name
+		tmp_paths.append(tmp_classes_path)
+		classes_blob.download_to_filename(tmp_classes_path)
+		with open(tmp_classes_path, "r", encoding="utf-8") as f:
+			class_names_local = json.load(f)
+		class_names.clear()
+		class_names.extend(class_names_local)
+
+		# Optional metadata
+		metadata.clear()
+		if metadata_blob and metadata_blob.exists():
+			with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f_md:
+				tmp_md_path = f_md.name
+			tmp_paths.append(tmp_md_path)
+			metadata_blob.download_to_filename(tmp_md_path)
+			with open(tmp_md_path, "r", encoding="utf-8") as f:
+				metadata.update(json.load(f))
+
+		# Version field
+		try:
+			if doc and doc.exists:
+				model_version_val = info.get("version", "unknown")
+				# allow int or str
+				model_version_str = str(model_version_val) if model_version_val is not None else "unknown"
+				globals()["model_version"] = model_version_str
+			else:
+				globals()["model_version"] = "unknown"
+		except Exception:
+			globals()["model_version"] = "unknown"
+
+		# Cleanup temps
+		for p in tmp_paths:
+			try:
+				if os.path.isdir(p):
+					shutil.rmtree(p, ignore_errors=True)
+				elif os.path.isfile(p):
+					os.unlink(p)
+			except Exception:
+				pass
+
+		globals()["model_loaded"] = True
 		logger.info("Model loaded successfully - %d classes, version: %s", len(class_names), model_version)
 		return True
+
 	except Exception as e:
 		logger.error(f"Error loading model: {e}", exc_info=True)
 		return False
@@ -195,7 +254,7 @@ def predict():
 		except Exception:
 			pass
 
-		# Quick heuristic: green-dominant pixel ratio (pre-resize)
+		# Green-dominant pixel ratio (heuristic; independent from model input)
 		thumb = image.copy()
 		thumb.thumbnail((224, 224))
 		arr = np.asarray(thumb, dtype=np.uint8)
@@ -203,7 +262,7 @@ def predict():
 		green_dom = (g > r) & (g > b)
 		green_ratio = float(np.mean(green_dom))
 
-		# Correct preprocessing to match training (EfficientNet)
+		# Model input (must match EfficientNet training preprocessing)
 		image = image.resize((224, 224))
 		image_array = np.array(image, dtype=np.float32)
 		image_array = preprocess_input(image_array)
@@ -212,7 +271,7 @@ def predict():
 		preds = model.predict(image_array, verbose=0)
 		probs = preds[0].astype(float)
 
-		# Generalized multi-class metrics
+		# Multi-class metrics
 		sorted_idx = np.argsort(probs)[::-1]
 		p1 = float(probs[sorted_idx[0]])
 		p2 = float(probs[sorted_idx[1]]) if len(sorted_idx) > 1 else 0.0
@@ -246,7 +305,7 @@ def predict():
 			CONF_THRESHOLD, MARGIN_THRESHOLD, TOPK_SUM_THRESHOLD, ENTROPY_THRESHOLD, GREEN_THRESHOLD
 		)
 
-		# Rejection rule: likely NOT a rice leaf
+		# OOD/reject rule
 		is_ood_not_rice = (
 			(conf < CONF_THRESHOLD) or
 			(margin12 < MARGIN_THRESHOLD) or
@@ -356,10 +415,8 @@ def get_diseases():
 def initialize_app():
 	try:
 		logger.info("Starting Rice Disease Prediction API...")
-		
-		# Initialize Firebase first
 		initialize_firebase()
-		
+
 		# Load model in background thread
 		def load_model_async():
 			global model_loading
@@ -367,14 +424,11 @@ def initialize_app():
 			logger.info("Loading model from Firebase...")
 			load_model_from_firebase()
 			model_loading = False
-		
-		# Start model loading in background
+
 		model_thread = threading.Thread(target=load_model_async, daemon=True)
 		model_thread.start()
-		
-		# Give the thread a moment to start
+
 		time.sleep(0.1)
-		
 		return True
 	except Exception as e:
 		logger.error(f"Failed to initialize application: {e}", exc_info=True)
