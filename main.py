@@ -17,6 +17,9 @@ import threading
 import time
 from tensorflow.keras.applications.efficientnet import preprocess_input
 
+# Enforce channels_last to avoid H5 shape quirks
+tf.keras.backend.set_image_data_format("channels_last")
+
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 
@@ -91,10 +94,18 @@ def load_model_from_firebase() -> bool:
 			classes_blob.download_to_filename(tmp_classes_path)
 
 		logger.info("Loading model from Storage path: models/rice_disease_model.h5")
-		model = tf.keras.models.load_model(tmp_model_path)
-		with open(tmp_classes_path, "r", encoding="utf-8") as f:
-			class_names = json.load(f)
+		# Load without compile to be tolerant to optimizer/metric mismatches
+		model_local = tf.keras.models.load_model(tmp_model_path, compile=False)
+		model = model_local
 
+		with open(tmp_classes_path, "r", encoding="utf-8") as f:
+			class_names_local = json.load(f)
+			# assign to global
+			global class_names
+			class_names = class_names_local
+
+		# Load optional metadata
+		global metadata
 		metadata = {}
 		tmp_md_path = None
 		if metadata_blob.exists():
@@ -104,6 +115,8 @@ def load_model_from_firebase() -> bool:
 			with open(tmp_md_path, "r", encoding="utf-8") as f:
 				metadata = json.load(f)
 
+		# Version from Firestore
+		global model_version
 		try:
 			if db is not None:
 				doc = db.collection("model_info").document("rice_disease_classifier").get()
@@ -113,6 +126,7 @@ def load_model_from_firebase() -> bool:
 		except Exception:
 			model_version = "unknown"
 
+		# Cleanup
 		for p in [tmp_model_path, tmp_classes_path, tmp_md_path]:
 			if p:
 				try:
@@ -120,6 +134,7 @@ def load_model_from_firebase() -> bool:
 				except Exception:
 					pass
 
+		global model_loaded
 		model_loaded = True
 		logger.info("Model loaded successfully - %d classes, version: %s", len(class_names), model_version)
 		return True
@@ -156,136 +171,135 @@ def get_disease_info(disease_name: str) -> dict:
 #prediction
 @app.route("/predict_disease", methods=["POST"])
 def predict():
-    global model, class_names
+	global model, class_names
 
-    if not model_loaded:
-        return jsonify({"status": "error", "message": "Model is still loading. Please try again in a few seconds."}), 503
+	if not model_loaded:
+		return jsonify({"status": "error", "message": "Model is still loading. Please try again in a few seconds."}), 503
 
-    try:
-        if "image" not in request.files:
-            return jsonify({"status": "error", "message": "No image file provided"}), 400
+	try:
+		if "image" not in request.files:
+			return jsonify({"status": "error", "message": "No image file provided"}), 400
 
-        file = request.files["image"]
-        if file.filename == "":
-            return jsonify({"status": "error", "message": "No image selected"}), 400
+		file = request.files["image"]
+		if file.filename == "":
+			return jsonify({"status": "error", "message": "No image selected"}), 400
 
-        # Load + normalize
-        image = Image.open(file.stream)
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        # EXIF orientation fix
-        try:
-            from PIL import ImageOps
-            image = ImageOps.exif_transpose(image)
-        except Exception:
-            pass
+		# Load + normalize
+		image = Image.open(file.stream)
+		if image.mode != "RGB":
+			image = image.convert("RGB")
+		# EXIF orientation fix
+		try:
+			from PIL import ImageOps
+			image = ImageOps.exif_transpose(image)
+		except Exception:
+			pass
 
-        # Quick heuristic: green-dominant pixel ratio (pre-resize)
-        thumb = image.copy()
-        thumb.thumbnail((224, 224))
-        arr = np.asarray(thumb, dtype=np.uint8)
-        r, g, b = arr[..., 0].astype(np.int32), arr[..., 1].astype(np.int32), arr[..., 2].astype(np.int32)
-        green_dom = (g > r) & (g > b)
-        green_ratio = float(np.mean(green_dom))
+		# Quick heuristic: green-dominant pixel ratio (pre-resize)
+		thumb = image.copy()
+		thumb.thumbnail((224, 224))
+		arr = np.asarray(thumb, dtype=np.uint8)
+		r, g, b = arr[..., 0].astype(np.int32), arr[..., 1].astype(np.int32), arr[..., 2].astype(np.int32)
+		green_dom = (g > r) & (g > b)
+		green_ratio = float(np.mean(green_dom))
 
-        # FIXED: Use correct preprocessing to match training
-        # Model input with correct preprocessing
-        image = image.resize((224, 224))
-        image_array = np.array(image, dtype=np.float32)
-        image_array = preprocess_input(image_array)  # CORRECT PREPROCESSING
-        image_array = np.expand_dims(image_array, axis=0)
+		# Correct preprocessing to match training (EfficientNet)
+		image = image.resize((224, 224))
+		image_array = np.array(image, dtype=np.float32)
+		image_array = preprocess_input(image_array)
+		image_array = np.expand_dims(image_array, axis=0)
 
-        preds = model.predict(image_array, verbose=0)
-        probs = preds[0].astype(float)
+		preds = model.predict(image_array, verbose=0)
+		probs = preds[0].astype(float)
 
-        # Generalized multi-class metrics
-        sorted_idx = np.argsort(probs)[::-1]
-        p1 = float(probs[sorted_idx[0]])
-        p2 = float(probs[sorted_idx[1]]) if len(sorted_idx) > 1 else 0.0
-        label = class_names[int(sorted_idx[0])]
-        conf = p1
-        margin12 = p1 - p2
+		# Generalized multi-class metrics
+		sorted_idx = np.argsort(probs)[::-1]
+		p1 = float(probs[sorted_idx[0]])
+		p2 = float(probs[sorted_idx[1]]) if len(sorted_idx) > 1 else 0.0
+		label = class_names[int(sorted_idx[0])]
+		conf = p1
+		margin12 = p1 - p2
 
-        K = int(os.getenv("TOPK", "3"))
-        top_candidates = [
-            {"label": class_names[int(i)], "confidence": float(probs[i])}
-            for i in sorted_idx[:K]
-        ]
-        topk_sum = float(np.sum(probs[sorted_idx[:K]]))
+		K = int(os.getenv("TOPK", "3"))
+		top_candidates = [
+			{"label": class_names[int(i)], "confidence": float(probs[i])}
+			for i in sorted_idx[:K]
+		]
+		topk_sum = float(np.sum(probs[sorted_idx[:K]]))
 
-        # Entropy (normalized 0..1)
-        eps = 1e-12
-        entropy = float(-np.sum(probs * np.log(probs + eps)))
-        num_classes = max(len(class_names), 2)
-        norm_entropy = float(entropy / np.log(num_classes))
+		# Entropy (normalized 0..1)
+		eps = 1e-12
+		entropy = float(-np.sum(probs * np.log(probs + eps)))
+		num_classes = max(len(class_names), 2)
+		norm_entropy = float(entropy / np.log(num_classes))
 
-        # Thresholds
-        CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.70"))
-        MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.12"))
-        TOPK_SUM_THRESHOLD = float(os.getenv("TOPK_SUM_THRESHOLD", "0.80"))
-        ENTROPY_THRESHOLD = float(os.getenv("ENTROPY_THRESHOLD", "0.60"))
-        GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.22"))
+		# Thresholds (env-overridable)
+		CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.70"))
+		MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.12"))
+		TOPK_SUM_THRESHOLD = float(os.getenv("TOPK_SUM_THRESHOLD", "0.80"))
+		ENTROPY_THRESHOLD = float(os.getenv("ENTROPY_THRESHOLD", "0.60"))
+		GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.22"))
 
-        logger.info(
-            "predict: label=%s conf=%.3f margin=%.3f topk_sum=%.3f H=%.3f green=%.3f thr=(%.2f,%.2f,%.2f,%.2f,%.2f)",
-            label, conf, margin12, topk_sum, norm_entropy, green_ratio,
-            CONF_THRESHOLD, MARGIN_THRESHOLD, TOPK_SUM_THRESHOLD, ENTROPY_THRESHOLD, GREEN_THRESHOLD
-        )
+		logger.info(
+			"predict: label=%s conf=%.3f margin=%.3f topk_sum=%.3f H=%.3f green=%.3f thr=(%.2f,%.2f,%.2f,%.2f,%.2f)",
+			label, conf, margin12, topk_sum, norm_entropy, green_ratio,
+			CONF_THRESHOLD, MARGIN_THRESHOLD, TOPK_SUM_THRESHOLD, ENTROPY_THRESHOLD, GREEN_THRESHOLD
+		)
 
-        # Rejection rule: likely NOT a rice leaf
-        is_ood_not_rice = (
-            (conf < CONF_THRESHOLD) or
-            (margin12 < MARGIN_THRESHOLD) or
-            (topk_sum < TOPK_SUM_THRESHOLD) or
-            (norm_entropy > ENTROPY_THRESHOLD) or
-            (green_ratio < GREEN_THRESHOLD)
-        )
+		# Rejection rule: likely NOT a rice leaf
+		is_ood_not_rice = (
+			(conf < CONF_THRESHOLD) or
+			(margin12 < MARGIN_THRESHOLD) or
+			(topk_sum < TOPK_SUM_THRESHOLD) or
+			(norm_entropy > ENTROPY_THRESHOLD) or
+			(green_ratio < GREEN_THRESHOLD)
+		)
 
-        if is_ood_not_rice:
-            return jsonify({
-                "status": "not_rice_leaf",
-                "message": "The image does not appear to be a rice leaf. Please retake a clearer, closer photo of a rice leaf.",
-                "predicted_disease": "N/A",
-                "confidence": conf,
-                "is_confident": False,
-                "threshold": CONF_THRESHOLD,
-                "green_ratio": green_ratio,
-                "top_candidates": top_candidates,
-                "disease_info": {
-                    "scientific_name": "N/A",
-                    "description": "N/A",
-                    "symptoms": ["N/A"],
-                    "cause": "N/A",
-                    "treatments": ["N/A"],
-                },
-                "all_predictions": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
-                "model_version": model_version,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-            }), 200
+		if is_ood_not_rice:
+			return jsonify({
+				"status": "not_rice_leaf",
+				"message": "The image does not appear to be a rice leaf. Please retake a clearer, closer photo of a rice leaf.",
+				"predicted_disease": "N/A",
+				"confidence": conf,
+				"is_confident": False,
+				"threshold": CONF_THRESHOLD,
+				"green_ratio": green_ratio,
+				"top_candidates": top_candidates,
+				"disease_info": {
+					"scientific_name": "N/A",
+					"description": "N/A",
+					"symptoms": ["N/A"],
+					"cause": "N/A",
+					"treatments": ["N/A"],
+				},
+				"all_predictions": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
+				"model_version": model_version,
+				"timestamp": datetime.utcnow().isoformat() + "Z",
+			}), 200
 
-        # Otherwise, proceed as normal
-        info = get_disease_info(label)
-        all_preds = {class_names[i]: float(probs[i]) for i in range(len(class_names))}
-        all_sorted = dict(sorted(all_preds.items(), key=lambda x: x[1], reverse=True))
+		# Otherwise, proceed as normal
+		info = get_disease_info(label)
+		all_preds = {class_names[i]: float(probs[i]) for i in range(len(class_names))}
+		all_sorted = dict(sorted(all_preds.items(), key=lambda x: x[1], reverse=True))
 
-        return jsonify({
-            "status": "success",
-            "message": None,
-            "predicted_disease": label,
-            "confidence": conf,
-            "is_confident": True,
-            "threshold": CONF_THRESHOLD,
-            "green_ratio": green_ratio,
-            "top_candidates": top_candidates,
-            "disease_info": info,
-            "all_predictions": all_sorted,
-            "model_version": model_version,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        }), 200
+		return jsonify({
+			"status": "success",
+			"message": None,
+			"predicted_disease": label,
+			"confidence": conf,
+			"is_confident": True,
+			"threshold": CONF_THRESHOLD,
+			"green_ratio": green_ratio,
+			"top_candidates": top_candidates,
+			"disease_info": info,
+			"all_predictions": all_sorted,
+			"model_version": model_version,
+			"timestamp": datetime.utcnow().isoformat() + "Z",
+		}), 200
 
-    except Exception as e:
-        logger.error(f"Prediction error: {e}", exc_info=True)
-        return jsonify({"status": "error", "message": f"Prediction failed: {str(e)}"}), 500
+	except Exception as e:
+		logger.error(f"Prediction error: {e}", exc_info=True)
+		return jsonify({"status": "error", "message": f"Prediction failed: {str(e)}"}), 500
 		
 @app.route("/reload_model", methods=["POST"])
 def reload_model():
