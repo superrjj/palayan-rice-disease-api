@@ -1,4 +1,3 @@
-# main.py
 import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -16,6 +15,7 @@ import tempfile
 from datetime import datetime
 import threading
 import time
+from tensorflow.keras.applications.efficientnet import preprocess_input
 
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
@@ -188,9 +188,12 @@ def predict():
         green_dom = (g > r) & (g > b)
         green_ratio = float(np.mean(green_dom))
 
-        # Model input
+        # FIXED: Use correct preprocessing to match training
+        # Model input with correct preprocessing
         image = image.resize((224, 224))
-        image_array = np.expand_dims(np.array(image, dtype=np.float32) / 255.0, axis=0)
+        image_array = np.array(image, dtype=np.float32)
+        image_array = preprocess_input(image_array)  # CORRECT PREPROCESSING
+        image_array = np.expand_dims(image_array, axis=0)
 
         preds = model.predict(image_array, verbose=0)
         probs = preds[0].astype(float)
@@ -370,6 +373,3 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
-
-
-
