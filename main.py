@@ -317,19 +317,19 @@ def predict():
 		if is_ood_not_rice:
 			return jsonify({
 				"status": "not_rice_leaf",
-				"message": "The image does not appear to be a rice leaf. Please retake a clearer, closer photo of a rice leaf.",
-				"predicted_disease": "N/A",
+				"message": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
+				"predicted_disease": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
 				"confidence": conf,
 				"is_confident": False,
 				"threshold": CONF_THRESHOLD,
 				"green_ratio": green_ratio,
 				"top_candidates": top_candidates,
 				"disease_info": {
-					"scientific_name": "N/A",
-					"description": "N/A",
-					"symptoms": ["N/A"],
-					"cause": "N/A",
-					"treatments": ["N/A"],
+					"scientific_name": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
+					"description": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
+					"symptoms": ["Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon."],
+					"cause": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
+					"treatments": ["Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon."],
 				},
 				"all_predictions": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
 				"model_version": model_version,
@@ -441,3 +441,4 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
+
