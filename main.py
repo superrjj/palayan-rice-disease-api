@@ -80,7 +80,12 @@ def _blob_from_gs(gs_url: str):
 
 def _build_serving_model(num_classes: int) -> tf.keras.Model:
 	inp = tf.keras.Input((224, 224, 3))
-	base = tf.keras.applications.EfficientNetB0(include_top=False, weights="imagenet", input_tensor=inp)
+	# IMPORTANT: don't load imagenet here; we'll load our own weights later
+	base = tf.keras.applications.EfficientNetB0(
+		include_top=False,
+		weights=None,
+		input_tensor=inp
+	)
 	base.trainable = False
 	x = tf.keras.layers.GlobalAveragePooling2D()(base.output)
 	x = tf.keras.layers.Dropout(0.5)(x)
@@ -468,3 +473,4 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
+
