@@ -78,6 +78,21 @@ def _blob_from_gs(gs_url: str):
 	path = gs_url[len(prefix):]
 	return bucket.blob(path)
 
+def _build_serving_model(num_classes: int) -> tf.keras.Model:
+	inp = tf.keras.Input((224, 224, 3))
+	base = tf.keras.applications.EfficientNetB0(include_top=False, weights="imagenet", input_tensor=inp)
+	base.trainable = False
+	x = tf.keras.layers.GlobalAveragePooling2D()(base.output)
+	x = tf.keras.layers.Dropout(0.5)(x)
+	x = tf.keras.layers.Dense(512, activation="relu")(x)
+	x = tf.keras.layers.BatchNormalization()(x)
+	x = tf.keras.layers.Dropout(0.5)(x)
+	x = tf.keras.layers.Dense(256, activation="relu")(x)
+	x = tf.keras.layers.BatchNormalization()(x)
+	x = tf.keras.layers.Dropout(0.4)(x)
+	out = tf.keras.layers.Dense(num_classes, activation="softmax", dtype="float32")(x)
+	return tf.keras.Model(inp, out)
+
 def load_model_from_firebase() -> bool:
 	global model, class_names, model_version, metadata, model_loaded
 
@@ -96,25 +111,37 @@ def load_model_from_firebase() -> bool:
 			info = {}
 
 		# Prefer SavedModel ZIP if provided
-		saved_zip_blob = _blob_from_gs(info.get("savedmodel_zip_url", "")) if info else None
+		saved_zip_url = info.get("savedmodel_zip_url", "")
 		h5_url = info.get("model_url", "gs://palayan-app.firebasestorage.app/models/rice_disease_model.h5") if info is not None else "gs://palayan-app.firebasestorage.app/models/rice_disease_model.h5"
 		classes_url = info.get("classes_url", "gs://palayan-app.firebasestorage.app/models/rice_disease_classes.json")
 		metadata_url = info.get("metadata_url", "gs://palayan-app.firebasestorage.app/models/rice_disease_metadata.json")
 
+		saved_zip_blob = _blob_from_gs(saved_zip_url) if saved_zip_url else None
 		model_blob = _blob_from_gs(h5_url)
 		classes_blob = _blob_from_gs(classes_url)
 		metadata_blob = _blob_from_gs(metadata_url)
 
 		missing = []
-		if saved_zip_blob is None and (model_blob is None or not model_blob.exists()):
-			missing.append("models/rice_disease_model.h5")
+		# We require at least classes.json
 		if classes_blob is None or not classes_blob.exists():
 			missing.append("models/rice_disease_classes.json")
+		if (saved_zip_blob is None or not saved_zip_blob.exists()) and (model_blob is None or not model_blob.exists()):
+			missing.append("model (SavedModel ZIP or H5)")
 		if missing:
 			logger.warning("Missing required files in Storage: %s", ", ".join(missing))
 			return False
 
 		tmp_paths = []
+
+		# Load class names first (needed for H5 fallback rebuild)
+		with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f_c:
+			tmp_classes_path = f_c.name
+		tmp_paths.append(tmp_classes_path)
+		classes_blob.download_to_filename(tmp_classes_path)
+		with open(tmp_classes_path, "r", encoding="utf-8") as f:
+			class_names_local = json.load(f)
+		class_names.clear()
+		class_names.extend(class_names_local)
 
 		# Try SavedModel ZIP first for robustness
 		loaded = False
@@ -132,7 +159,6 @@ def load_model_from_firebase() -> bool:
 				model_local = tf.keras.models.load_model(tmp_dir, compile=False)
 				model = model_local
 				loaded = True
-				# cleanup extracted dir later
 				tmp_paths.append(tmp_dir)
 			except Exception as e:
 				logger.warning("SavedModel load failed, will try H5: %s", e)
@@ -141,25 +167,27 @@ def load_model_from_firebase() -> bool:
 				except Exception:
 					pass
 
-		# Fallback: H5 load
-		if not loaded:
+		# Fallback: H5 load (robust path)
+		if not loaded and model_blob and model_blob.exists():
 			with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as f_m:
 				tmp_model_path = f_m.name
 			tmp_paths.append(tmp_model_path)
 			logger.info("Loading model from Storage path: models/rice_disease_model.h5")
 			model_blob.download_to_filename(tmp_model_path)
-			model_local = tf.keras.models.load_model(tmp_model_path, compile=False)
-			model = model_local
-
-		# Download classes
-		with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f_c:
-			tmp_classes_path = f_c.name
-		tmp_paths.append(tmp_classes_path)
-		classes_blob.download_to_filename(tmp_classes_path)
-		with open(tmp_classes_path, "r", encoding="utf-8") as f:
-			class_names_local = json.load(f)
-		class_names.clear()
-		class_names.extend(class_names_local)
+			try:
+				# Fast path: deserialize full model
+				model_local = tf.keras.models.load_model(tmp_model_path, compile=False)
+				model = model_local
+			except ValueError as e:
+				msg = str(e)
+				if "Shape mismatch" in msg and "stem_conv/kernel" in msg:
+					logger.warning("H5 mismatch; rebuilding 3-channel model and loading weights with skip_mismatch.")
+					rebuilt = _build_serving_model(len(class_names))
+					# Load weights by name, allow minor shape diffs
+					rebuilt.load_weights(tmp_model_path, by_name=True, skip_mismatch=True)
+					model = rebuilt
+				else:
+					raise
 
 		# Optional metadata
 		metadata.clear()
@@ -175,7 +203,6 @@ def load_model_from_firebase() -> bool:
 		try:
 			if doc and doc.exists:
 				model_version_val = info.get("version", "unknown")
-				# allow int or str
 				model_version_str = str(model_version_val) if model_version_val is not None else "unknown"
 				globals()["model_version"] = model_version_str
 			else:
@@ -441,4 +468,3 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
-
