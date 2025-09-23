@@ -80,7 +80,6 @@ return bucket.blob(path)
 
 def _build_serving_model(num_classes: int) -> tf.keras.Model:
 inp = tf.keras.Input((224, 224, 3))
-	base = tf.keras.applications.EfficientNetB0(include_top=False, weights="imagenet", input_tensor=inp)
 	# IMPORTANT: don't load imagenet here; we'll load our own weights later
 	base = tf.keras.applications.EfficientNetB0(
 		include_top=False,
@@ -326,11 +325,11 @@ num_classes = max(len(class_names), 2)
 norm_entropy = float(entropy / np.log(num_classes))
 
 # Thresholds (env-overridable)
-CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.70"))
-MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.12"))
-TOPK_SUM_THRESHOLD = float(os.getenv("TOPK_SUM_THRESHOLD", "0.80"))
-ENTROPY_THRESHOLD = float(os.getenv("ENTROPY_THRESHOLD", "0.60"))
-GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.22"))
+CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.50"))
+MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.05"))
+TOPK_SUM_THRESHOLD = float(os.getenv("TOPK_SUM_THRESHOLD", "0.60"))
+ENTROPY_THRESHOLD = float(os.getenv("ENTROPY_THRESHOLD", "0.98"))
+GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.05"))
 
 logger.info(
 "predict: label=%s conf=%.3f margin=%.3f topk_sum=%.3f H=%.3f green=%.3f thr=(%.2f,%.2f,%.2f,%.2f,%.2f)",
@@ -474,3 +473,4 @@ if __name__ == "__main__":
 port = int(os.environ.get("PORT", "5000"))
 logger.info(f"Server starting on port {port}")
 app.run(host="0.0.0.0", port=port, debug=False)
+
