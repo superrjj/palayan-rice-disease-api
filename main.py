@@ -42,6 +42,13 @@ metadata: dict = {}
 model_loading = False
 model_loaded = False
 
+def get_env_float(name: str, default_str: str) -> float:
+	val = os.getenv(name, default_str)
+	try:
+		return float(str(val).strip().strip('"').strip("'"))
+	except Exception:
+		return float(default_str)
+
 def initialize_firebase():
 	global db, bucket
 
@@ -324,22 +331,42 @@ def predict():
 		num_classes = max(len(class_names), 2)
 		norm_entropy = float(entropy / np.log(num_classes))
 
-		# Thresholds (env-overridable)
-		CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.70"))
-		MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.12"))
-		TOPK_SUM_THRESHOLD = float(os.getenv("TOPK_SUM_THRESHOLD", "0.80"))
-		ENTROPY_THRESHOLD = float(os.getenv("ENTROPY_THRESHOLD", "0.60"))
-		GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.22"))
+		# Thresholds (env-overridable) + switches
+		CONF_THRESHOLD   = get_env_float("PREDICTION_THRESHOLD", "0.50")
+		MARGIN_THRESHOLD = get_env_float("PREDICTION_MARGIN_THRESHOLD", "0.05")
+		TOPK_SUM_THRESHOLD = get_env_float("TOPK_SUM_THRESHOLD", "0.60")
+		ENTROPY_THRESHOLD  = get_env_float("ENTROPY_THRESHOLD", "0.98")
+		GREEN_THRESHOLD    = get_env_float("GREEN_RATIO_THRESHOLD", "0.05")
+		OOD_ENABLED = os.getenv("OOD_ENABLED", "0") != "0"   # 0 = disabled
+		BINARY_MODE = os.getenv("BINARY_MODE", "1") == "1"   # 1 = Healthy vs May_sakit
 
-		
 		logger.info(
-			"predict: label=%s conf=%.3f margin=%.3f topk_sum=%.3f H=%.3f green=%.3f thr=(%.2f,%.2f,%.2f,%.2f,%.2f)",
+			"predict: label=%s conf=%.3f margin=%.3f topk_sum=%.3f H=%.3f green=%.3f thr=(%.2f,%.2f,%.2f,%.2f,%.2f) OOD=%s BIN=%s",
 			label, conf, margin12, topk_sum, norm_entropy, green_ratio,
-			CONF_THRESHOLD, MARGIN_THRESHOLD, TOPK_SUM_THRESHOLD, ENTROPY_THRESHOLD, GREEN_THRESHOLD
+			CONF_THRESHOLD, MARGIN_THRESHOLD, TOPK_SUM_THRESHOLD, ENTROPY_THRESHOLD, GREEN_THRESHOLD,
+			str(OOD_ENABLED), str(BINARY_MODE)
 		)
 
-		# OOD/reject rule
-		is_ood_not_rice = (
+		# Optional: Binary output only (Healthy vs May_sakit)
+		if BINARY_MODE and "Healthy" in class_names:
+			healthy_idx = class_names.index("Healthy")
+			healthy_conf = float(probs[healthy_idx])
+			is_sick = healthy_conf < 0.50
+			binary_label = "May_sakit" if is_sick else "Healthy"
+			return jsonify({
+				"status": "success",
+				"message": None,
+				"predicted_disease": binary_label,
+				"confidence": 1.0 - healthy_conf if is_sick else healthy_conf,
+				"green_ratio": green_ratio,
+				"top_candidates": top_candidates,
+				"all_predictions": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
+				"model_version": model_version,
+				"timestamp": datetime.utcnow().isoformat() + "Z",
+			}), 200
+
+		# OOD/reject rule (can be disabled)
+		is_ood_not_rice = OOD_ENABLED and (
 			(conf < CONF_THRESHOLD) or
 			(margin12 < MARGIN_THRESHOLD) or
 			(topk_sum < TOPK_SUM_THRESHOLD) or
@@ -350,26 +377,26 @@ def predict():
 		if is_ood_not_rice:
 			return jsonify({
 				"status": "not_rice_leaf",
-				"message": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
-				"predicted_disease": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
+				"message": "Hindi dahon ng palay.",
+				"predicted_disease": "Hindi dahon ng palay.",
 				"confidence": conf,
 				"is_confident": False,
 				"threshold": CONF_THRESHOLD,
 				"green_ratio": green_ratio,
 				"top_candidates": top_candidates,
 				"disease_info": {
-					"scientific_name": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
-					"description": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
-					"symptoms": ["Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon."],
-					"cause": "Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon.",
-					"treatments": ["Maling kuha, hindi dahon ng palay. Subukan mong picturan ulit yung dahon."],
+					"scientific_name": "Hindi dahon ng palay.",
+					"description": "Hindi dahon ng palay.",
+					"symptoms": ["Hindi dahon ng palay."],
+					"cause": "Hindi dahon ng palay.",
+					"treatments": ["Hindi dahon ng palay."],
 				},
 				"all_predictions": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
 				"model_version": model_version,
 				"timestamp": datetime.utcnow().isoformat() + "Z",
 			}), 200
 
-		# Otherwise, proceed as normal
+		# Otherwise, proceed as normal (multi-class)
 		info = get_disease_info(label)
 		all_preds = {class_names[i]: float(probs[i]) for i in range(len(class_names))}
 		all_sorted = dict(sorted(all_preds.items(), key=lambda x: x[1], reverse=True))
@@ -392,7 +419,19 @@ def predict():
 	except Exception as e:
 		logger.error(f"Prediction error: {e}", exc_info=True)
 		return jsonify({"status": "error", "message": f"Prediction failed: {str(e)}"}), 500
-		
+
+@app.route("/thresholds", methods=["GET"])
+def thresholds():
+	return jsonify({
+		"PREDICTION_THRESHOLD": os.getenv("PREDICTION_THRESHOLD"),
+		"PREDICTION_MARGIN_THRESHOLD": os.getenv("PREDICTION_MARGIN_THRESHOLD"),
+		"TOPK_SUM_THRESHOLD": os.getenv("TOPK_SUM_THRESHOLD"),
+		"ENTROPY_THRESHOLD": os.getenv("ENTROPY_THRESHOLD"),
+		"GREEN_RATIO_THRESHOLD": os.getenv("GREEN_RATIO_THRESHOLD"),
+		"OOD_ENABLED": os.getenv("OOD_ENABLED", "0"),
+		"BINARY_MODE": os.getenv("BINARY_MODE", "1"),
+	}), 200
+
 @app.route("/reload_model", methods=["POST"])
 def reload_model():
 	try:
@@ -474,6 +513,3 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
-
-
-
