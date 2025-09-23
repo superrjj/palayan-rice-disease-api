@@ -73,7 +73,7 @@ def initialize_firebase():
 
 def _blob_from_gs(gs_url: str):
 	if not gs_url or not isinstance(gs_url, str):
-	return None
+		return None
 	prefix = f"gs://{bucket.name}/"
 	if not gs_url.startswith(prefix):
 		return None
@@ -476,3 +476,4 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
+
