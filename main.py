@@ -79,25 +79,20 @@ path = gs_url[len(prefix):]
 return bucket.blob(path)
 
 def _build_serving_model(num_classes: int) -> tf.keras.Model:
-inp = tf.keras.Input((224, 224, 3))
-	# IMPORTANT: don't load imagenet here; we'll load our own weights later
-	base = tf.keras.applications.EfficientNetB0(
-		include_top=False,
-		weights=None,
-		input_tensor=inp
-	)
-base.trainable = False
-x = tf.keras.layers.GlobalAveragePooling2D()(base.output)
-x = tf.keras.layers.Dropout(0.5)(x)
-x = tf.keras.layers.Dense(512, activation="relu")(x)
-x = tf.keras.layers.BatchNormalization()(x)
-x = tf.keras.layers.Dropout(0.5)(x)
-x = tf.keras.layers.Dense(256, activation="relu")(x)
-x = tf.keras.layers.BatchNormalization()(x)
-x = tf.keras.layers.Dropout(0.4)(x)
-out = tf.keras.layers.Dense(num_classes, activation="softmax", dtype="float32")(x)
-return tf.keras.Model(inp, out)
-
+	inp = tf.keras.Input((224, 224, 3))
+	base = tf.keras.applications.EfficientNetB0(include_top=False, weights=None, input_tensor=inp)
+	base.trainable = False
+	x = tf.keras.layers.GlobalAveragePooling2D()(base.output)
+	x = tf.keras.layers.Dropout(0.5)(x)
+	x = tf.keras.layers.Dense(512, activation="relu")(x)
+	x = tf.keras.layers.BatchNormalization()(x)
+	x = tf.keras.layers.Dropout(0.5)(x)
+	x = tf.keras.layers.Dense(256, activation="relu")(x)
+	x = tf.keras.layers.BatchNormalization()(x)
+	x = tf.keras.layers.Dropout(0.4)(x)
+	out = tf.keras.layers.Dense(num_classes, activation="softmax", dtype="float32")(x)
+	return tf.keras.Model(inp, out)
+	
 def load_model_from_firebase() -> bool:
 global model, class_names, model_version, metadata, model_loaded
 
@@ -473,4 +468,5 @@ if __name__ == "__main__":
 port = int(os.environ.get("PORT", "5000"))
 logger.info(f"Server starting on port {port}")
 app.run(host="0.0.0.0", port=port, debug=False)
+
 
