@@ -325,13 +325,12 @@ def predict():
 		norm_entropy = float(entropy / np.log(num_classes))
 
 		# Thresholds (env-overridable)
-		CONF_THRESHOLD   = get_env_float("PREDICTION_THRESHOLD", "0.50")
-		MARGIN_THRESHOLD = get_env_float("PREDICTION_MARGIN_THRESHOLD", "0.05")
-		TOPK_SUM_THRESHOLD = get_env_float("TOPK_SUM_THRESHOLD", "0.60")
-		ENTROPY_THRESHOLD  = get_env_float("ENTROPY_THRESHOLD", "0.98")
-		GREEN_THRESHOLD    = get_env_float("GREEN_RATIO_THRESHOLD", "0.05")
+		CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.70"))
+		MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.12"))
+		TOPK_SUM_THRESHOLD = float(os.getenv("TOPK_SUM_THRESHOLD", "0.80"))
+		ENTROPY_THRESHOLD = float(os.getenv("ENTROPY_THRESHOLD", "0.60"))
+		GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.22"))
 
-		logger.info("env-read: PRED=%r MARGIN=%r", os.getenv("PREDICTION_THRESHOLD"), os.getenv("PREDICTION_MARGIN_THRESHOLD"))
 		
 		logger.info(
 			"predict: label=%s conf=%.3f margin=%.3f topk_sum=%.3f H=%.3f green=%.3f thr=(%.2f,%.2f,%.2f,%.2f,%.2f)",
@@ -475,5 +474,6 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
