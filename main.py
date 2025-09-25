@@ -323,9 +323,9 @@ def predict():
 		norm_entropy = float(entropy / np.log(num_classes))
 
 		# Thresholds (env-overridable)
-		CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.50"))
-		MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.05"))
-		TOPK_SUM_THRESHOLD = float(os.getenv("TOPK_SUM_THRESHOLD", "0.60"))
+		CONF_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.70"))
+		MARGIN_THRESHOLD = float(os.getenv("PREDICTION_MARGIN_THRESHOLD", "0.10"))
+		TOPK_SUM_THRESHOLD = float(os.getenv("TOPK_SUM_THRESHOLD", "0.80"))
 		ENTROPY_THRESHOLD = float(os.getenv("ENTROPY_THRESHOLD", "0.98"))
 		GREEN_THRESHOLD = float(os.getenv("GREEN_RATIO_THRESHOLD", "0.05"))
 
@@ -476,4 +476,5 @@ if __name__ == "__main__":
 	port = int(os.environ.get("PORT", "5000"))
 	logger.info(f"Server starting on port {port}")
 	app.run(host="0.0.0.0", port=port, debug=False)
+
 
